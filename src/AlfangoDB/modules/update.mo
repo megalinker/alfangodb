@@ -228,7 +228,7 @@ module {
                                     let oldCompoundKey = Utils.generateCompoundKey(
                                         item.attributeDataValueMap,
                                         HashMap.HashMap<Text, Datatype.AttributeDataValue>(0, Text.equal, Text.hash),
-                                        indexTable.attributeNames
+                                        indexTable.attributeNames,
                                     );
                                     let newCompoundKey = Utils.generateCompoundKey(item.attributeDataValueMap, patchData, indexTable.attributeNames);
 
@@ -280,6 +280,10 @@ module {
                                     };
                                 };
                                 item.updatedAt := Time.now();
+
+                                for ((attrName, attrValue) in patchData.entries()) {
+                                    Map.set(item.attributeDataValueMap, thash, attrName, attrValue);
+                                };
 
                                 Debug.print("item updated with id: " # debug_show (updateItemInput.id));
                                 return #ok({
