@@ -1,6 +1,7 @@
 import Datatypes "datatype";
 import Database "database";
 import Result "mo:base/Result";
+import SearchTypes "search";
 
 module {
 
@@ -11,6 +12,8 @@ module {
     public type CreateTableOutputType = Result.Result<{}, [Text]>;
 
     public type CreateItemOutputType = Result.Result<{ id : Text; item : [(Text, Datatypes.AttributeDataValue)] }, [Text]>;
+
+    public type CreateIndexOutputType = Result.Result<{ databaseName : Text; tableName : Text; indexName : Text }, [Text]>;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -34,7 +37,7 @@ module {
 
     public type BatchGetItemByIdOutputType = Result.Result<{ items : [ItemOutputType]; notFoundIds : [Text] }, [Text]>;
 
-    public type GetItemCountOutputType = Result.Result<{ count : Int }, [Text]>;
+    public type GetItemCountOutputType = Result.Result<{ count : Nat }, [Text]>;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -42,13 +45,13 @@ module {
 
     public type ScanAndGetIdsOutputType = Result.Result<{ ids : [Text] }, [Text]>;
 
-    public type PaginatedScanOutputType = Result.Result<{ items : [{ id : Text; item : [(Text, Datatypes.AttributeDataValue)] }]; offset : Nat; limit : Nat; scannedItemCount : Int; nonScannedItemCount : Int }, [Text]>;
+    public type PaginatedScanOutputType = Result.Result<{ items : [ItemOutputType]; limit : Nat; hasMore : Bool; nextCursor : ?SearchTypes.PaginatedScanCursor }, [Text]>;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    public type AddAttributeOutputType = Result.Result<{ databaseName : Text; tableName : Text; attributeName : Text }, [Text]>;
+    public type AddAttributeOutputType = Result.Result<{ databaseName : Text; tableName : Text; attributeNames : Text }, [Text]>;
 
-    public type DropAttributeOutputType = Result.Result<{ databaseName : Text; tableName : Text; attributeName : Text }, [Text]>;
+    public type DropAttributeOutputType = Result.Result<{ databaseName : Text; tableName : Text; attributeNames : Text }, [Text]>;
 
     public type UpdateItemOutputType = Result.Result<{ id : Text; item : [(Text, Datatypes.AttributeDataValue)] }, [Text]>;
 
@@ -77,6 +80,7 @@ module {
         #AddAttributeOutput : AddAttributeOutputType;
         #DropAttributeOutput : DropAttributeOutputType;
         #CreateItemOutput : CreateItemOutputType;
+        #CreateIndexOutput : CreateIndexOutputType;
         #UpdateItemOutput : UpdateItemOutputType;
         #DeleteDatabaseOutput : DeleteDatabaseOutputType;
         #DeleteTableOutput : DeleteTableOutputType;

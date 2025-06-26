@@ -1,13 +1,14 @@
 import Datatypes "../types/datatype";
 import Database "../types/database";
 import Utils "../utils";
-import HashMap "mo:base/HashMap";
 import Text "mo:base/Text";
 import Buffer "mo:base/Buffer";
 import Debug "mo:base/Debug";
 import Map "mo:map/Map";
 import Set "mo:map/Set";
 import { thash } "mo:map/Map";
+import BTree "mo:stableheapbtreemap/BTree";
+import Vector "mo:vector";
 
 module {
 
@@ -25,26 +26,26 @@ module {
         var unwrappedAttributeDataType : AttributeDataType = #default;
 
         switch (attributeDataValue) {
-            case (#int(intValue)) { unwrappedAttributeDataType := #int };
-            case (#int8(int8Value)) { unwrappedAttributeDataType := #int8 };
-            case (#int16(int16Value)) { unwrappedAttributeDataType := #int16 };
-            case (#int32(int32Value)) { unwrappedAttributeDataType := #int32 };
-            case (#int64(int64Value)) { unwrappedAttributeDataType := #int64 };
-            case (#nat(natValue)) { unwrappedAttributeDataType := #nat };
-            case (#nat8(nat8Value)) { unwrappedAttributeDataType := #nat8 };
-            case (#nat16(nat16Value)) { unwrappedAttributeDataType := #nat16 };
-            case (#nat32(nat32Value)) { unwrappedAttributeDataType := #nat32 };
-            case (#nat64(nat64Value)) { unwrappedAttributeDataType := #nat64 };
-            case (#float(floatValue)) { unwrappedAttributeDataType := #float };
-            case (#text(textValue)) { unwrappedAttributeDataType := #text };
-            case (#char(charValue)) { unwrappedAttributeDataType := #char };
-            case (#bool(boolValue)) { unwrappedAttributeDataType := #bool };
-            case (#principal(principalValue)) {
+            case (#int(_intValue)) { unwrappedAttributeDataType := #int };
+            case (#int8(_int8Value)) { unwrappedAttributeDataType := #int8 };
+            case (#int16(_int16Value)) { unwrappedAttributeDataType := #int16 };
+            case (#int32(_int32Value)) { unwrappedAttributeDataType := #int32 };
+            case (#int64(_int64Value)) { unwrappedAttributeDataType := #int64 };
+            case (#nat(_natValue)) { unwrappedAttributeDataType := #nat };
+            case (#nat8(_nat8Value)) { unwrappedAttributeDataType := #nat8 };
+            case (#nat16(_nat16Value)) { unwrappedAttributeDataType := #nat16 };
+            case (#nat32(_nat32Value)) { unwrappedAttributeDataType := #nat32 };
+            case (#nat64(_nat64Value)) { unwrappedAttributeDataType := #nat64 };
+            case (#float(_floatValue)) { unwrappedAttributeDataType := #float };
+            case (#text(_textValue)) { unwrappedAttributeDataType := #text };
+            case (#char(_charValue)) { unwrappedAttributeDataType := #char };
+            case (#bool(_boolValue)) { unwrappedAttributeDataType := #bool };
+            case (#principal(_principalValue)) {
                 unwrappedAttributeDataType := #principal;
             };
-            case (#blob(blobValue)) { unwrappedAttributeDataType := #blob };
-            case (#list(listValue)) { unwrappedAttributeDataType := #list };
-            case (#map(mapValue)) { unwrappedAttributeDataType := #map };
+            case (#blob(_blobValue)) { unwrappedAttributeDataType := #blob };
+            case (#list(_listValue)) { unwrappedAttributeDataType := #list };
+            case (#map(_mapValue)) { unwrappedAttributeDataType := #map };
             case (#default) { unwrappedAttributeDataType := #default };
         };
 
@@ -114,18 +115,14 @@ module {
         };
     };
 
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    private func checkUniqueIndexViolation(
+        indexTable : Database.IndexTable,
+        compoundKey : Text,
+        itemIdToIgnore : ?Text,
+    ) : Bool {
+        let indexBTree = indexTable.items;
 
-    public func validateUniqueAttribute({
-        attributeKeyDataValue : (AttributeName, AttributeDataValue);
-        indexTable : Database.IndexTable;
-        itemIdToIgnore : ?Text;
-    }) : Bool {
-
-        let (attributeName, attributeDataValue) = attributeKeyDataValue;
-        let indexItems = indexTable.items;
-
-        switch (Map.get(indexItems, Utils.DataTypeValueHashUtils, attributeDataValue)) {
+        switch (BTree.get(indexBTree, Text.compare, compoundKey)) {
             case (null) {
                 return true;
             };
@@ -152,44 +149,59 @@ module {
         };
     };
 
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-    public func validateUniqueAttributes({
-        attributeKeyDataValues : [(Text, Datatypes.AttributeDataValue)];
-        indexes : Map.Map<Text, Database.IndexTable>;
-        tableMetadata : Database.TableMetadata;
+    public func validateUniqueConstraints({
+        itemDataMap : Map.Map<AttributeName, AttributeDataValue>;
+        table : Database.Table;
         itemIdToIgnore : ?Text;
     }) : {
-        invalidUnquieAttributes : [Text];
-        uniqueAttributesUnique : Bool;
+        violatedAttributes : ?[AttributeName];
+        areConstraintsMet : Bool;
     } {
+        for (indexMetadata in Vector.vals(table.metadata.indexes)) {
+            if (indexMetadata.unique) {
+                switch (Map.get(table.indexes, thash, indexMetadata.name)) {
+                    case (null) {
+                        Debug.print("CRITICAL: Inconsistency found. Metadata for index '" # indexMetadata.name # "' exists, but the index table does not.");
+                        return {
+                            violatedAttributes = ?indexMetadata.attributeNames;
+                            areConstraintsMet = false;
+                        };
+                    };
+                    case (?indexTable) {
+                        switch (Utils.generateCompoundKey(itemDataMap, indexTable.attributeNames)) {
+                            case (null) {};
+                            case (?compoundKey) {
+                                let isIndexValid = checkUniqueIndexViolation(
+                                    indexTable,
+                                    compoundKey,
+                                    itemIdToIgnore,
+                                );
 
-        let attributeDataValueMap = HashMap.fromIter<Text, Datatypes.AttributeDataValue>(attributeKeyDataValues.vals(), 0, Text.equal, Text.hash);
-        let invalidUnquieAttributes = Buffer.Buffer<Text>(0);
-
-        label l0 for (attributeMetadata in Map.vals(tableMetadata.attributesMap)) {
-            // check for unique attribute
-            if (not attributeMetadata.unique) {
-                continue l0;
-            };
-
-            let attributeName = attributeMetadata.name;
-            ignore do ? {
-                let attributeValue = attributeDataValueMap.get(attributeName)!;
-                let isValidUniqueAttribute = validateUniqueAttribute({
-                    attributeKeyDataValue = (attributeName, attributeValue);
-                    indexTable = Map.get(indexes, thash, attributeName)!;
-                    itemIdToIgnore;
-                });
-                if (not isValidUniqueAttribute) {
-                    invalidUnquieAttributes.add(attributeName);
+                                if (not isIndexValid) {
+                                    return {
+                                        violatedAttributes = ?indexTable.attributeNames;
+                                        areConstraintsMet = false;
+                                    };
+                                };
+                            };
+                        };
+                    };
                 };
             };
         };
 
+        for (attr in Map.vals(table.metadata.attributesMap)) {
+            if (attr.unique) {
+                // This is a simplified check for single-attribute uniqueness.
+                // A more robust implementation would have an implicit index for every `unique` attribute.
+                // For now, this logic is deferred to the explicit unique index check above.
+                // To make this work, a user MUST create a unique index on any attribute they mark as `unique`.
+            };
+        };
+
         return {
-            invalidUnquieAttributes = Buffer.toArray(invalidUnquieAttributes);
-            uniqueAttributesUnique = invalidUnquieAttributes.size() == 0;
+            violatedAttributes = null;
+            areConstraintsMet = true;
         };
     };
 

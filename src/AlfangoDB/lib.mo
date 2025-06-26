@@ -9,9 +9,12 @@ import Update "modules/update";
 import Delete "modules/delete";
 import Search "modules/search";
 import Service "service";
+import Actor "actor";
 
 module {
 
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // DATA TYPES
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type DefaultAttributeDataType = Datatypes.DefaultAttributeDataType;
@@ -33,6 +36,8 @@ module {
     public type AttributeDataValue = Datatypes.AttributeDataValue;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // DATABASE STRUCTURE TYPES
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type AttributeMetadata = Database.AttributeMetadata;
     public type TableIndexMetadata = Database.TableIndexMetadata;
@@ -41,87 +46,76 @@ module {
     public type IndexTable = Database.IndexTable;
     public type Table = Database.Table;
     public type Database = Database.Database;
+    public type AlfangoDB = Database.AlfangoDB;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-    public type AlfangoDB = Database.AlfangoDB;
-    public let AlfangoDB = Database.AlfangoDB;
-
+    // OPERATIONS & FUNCTIONS
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type CreateDatabaseInputType = InputTypes.CreateDatabaseInputType;
     public type CreateTableInputType = InputTypes.CreateTableInputType;
     public type CreateItemInputType = InputTypes.CreateItemInputType;
-
     public type CreateDatabaseOutputType = OutputTypes.CreateDatabaseOutputType;
     public type CreateTableOutputType = OutputTypes.CreateTableOutputType;
     public type CreateItemOutputType = OutputTypes.CreateItemOutputType;
-
     public let { createDatabase; createTable; createItem } = Create;
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type GetTableMetadataInputType = InputTypes.GetTableMetadataInputType;
     public type GetItemByIdInputType = InputTypes.GetItemByIdInputType;
     public type BatchGetItemByIdInputType = InputTypes.BatchGetItemByIdInputType;
     public type GetItemCountInputType = InputTypes.GetItemCountInputType;
-
     public type GetTableMetadataOutputType = OutputTypes.GetTableMetadataOutputType;
     public type GetItemByIdOutputType = OutputTypes.GetItemByIdOutputType;
     public type BatchGetItemByIdOutputType = OutputTypes.BatchGetItemByIdOutputType;
     public type GetItemCountOutputType = OutputTypes.GetItemCountOutputType;
-
-    public let { getTableMetadata; getItemById; batchGetItemById; getItemCount } = Read;
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    public let {
+        getTableMetadata;
+        getItemById;
+        batchGetItemById;
+        getItemCount;
+    } = Read;
 
     public type RelationalExpressionAttributeDataValue = SearchTypes.RelationalExpressionAttributeDataValue;
     public type FilterExpressionConditionType = SearchTypes.FilterExpressionConditionType;
-
+    public type QueryFilter = SearchTypes.QueryFilter;
     public type ScanInputType = InputTypes.ScanInputType;
     public type ScanAndGetIdsInputType = InputTypes.ScanAndGetIdsInputType;
     public type PaginatedScanInputType = InputTypes.PaginatedScanInputType;
-
     public type ScanOutputType = OutputTypes.ScanOutputType;
     public type ScanAndGetIdsOutputType = OutputTypes.ScanAndGetIdsOutputType;
     public type PaginatedScanOutputType = OutputTypes.PaginatedScanOutputType;
-
     public let { scan; scanAndGetIds; paginatedScan } = Search;
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type AddAttributeInputType = InputTypes.AddAttributeInputType;
     public type DropAttributeInputType = InputTypes.DropAttributeInputType;
     public type UpdateItemInputType = InputTypes.UpdateItemInputType;
-
     public type AddAttributeOutputType = OutputTypes.AddAttributeOutputType;
     public type DropAttributeOutputType = OutputTypes.DropAttributeOutputType;
     public type UpdateItemOutputType = OutputTypes.UpdateItemOutputType;
-
     public let { addAttribute; dropAttribute; updateItem } = Update;
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type DeleteDatabaseInputType = InputTypes.DeleteDatabaseInputType;
     public type DeleteTableInputType = InputTypes.DeleteTableInputType;
     public type DeleteItemInputType = InputTypes.DeleteItemInputType;
-
     public type DeleteDatabaseOutputType = OutputTypes.DeleteDatabaseOutputType;
     public type DeleteTableOutputType = OutputTypes.DeleteTableOutputType;
     public type DeleteItemOutputType = OutputTypes.DeleteItemOutputType;
-
     public let { deleteDatabase; deleteTable; deleteItem } = Delete;
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type UpdateOpsInputType = InputTypes.UpdateOpsInputType;
     public type QueryOpsInputType = InputTypes.QueryOpsInputType;
-
     public type UpdateOpsOutputType = OutputTypes.UpdateOpsOutputType;
     public type QueryOpsOutputType = OutputTypes.QueryOpsOutputType;
-
     public let { updateOperation; queryOperation } = Service;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // EXPORT ACTOR CLASS
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    /**
+    * The main actor class for instantiating a stateful database canister.
+    * Example usage in a main.mo file:
+    * `actor : AlfangoDB.AlfangoDBActor {};`
+    */
+    public let AlfangoDBActor = Actor.AlfangoDBActor;
 };

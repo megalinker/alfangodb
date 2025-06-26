@@ -5,6 +5,10 @@ module {
     type NumericAttributeDataValue = Datatypes.NumericAttributeDataValue;
     type StringAttributeDataValue = Datatypes.StringAttributeDataValue;
     type ListAttributeDataValue = Datatypes.ListAttributeDataValue;
+    public type PaginatedScanCursor = {
+        plan : QueryPlan;
+        lastId : Text;
+    };
 
     public type RelationalExpressionAttributeDataValue = NumericAttributeDataValue or StringAttributeDataValue or {
         #bool : Bool;
@@ -32,8 +36,25 @@ module {
     };
 
     public type FilterExpressionType = {
-        attributeName : Text;
+        attributeNames : Text;
         filterExpressionCondition : FilterExpressionConditionType;
+    };
+
+    public type QueryPlan = {
+        #IndexScan : {
+            indexName : Text;
+            scanBounds : { lower : Text; upper : Text };
+            remainingFilter : QueryFilter;
+        };
+        #FullTableScan : {
+            filter : QueryFilter;
+        };
+    };
+
+    public type QueryFilter = {
+        #expression : FilterExpressionType;
+        #AND : [QueryFilter];
+        #OR : [QueryFilter];
     };
 
 };

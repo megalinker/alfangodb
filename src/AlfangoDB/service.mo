@@ -30,8 +30,22 @@ module {
             case (#CreateItemInput(createItemInput)) {
                 return #CreateItemOutput(await Create.createItem({ createItemInput; alfangoDB }));
             };
+            case (#CreateIndexInput(createIndexInput)) {
+                return #CreateIndexOutput(Update.createIndex({ createIndexInput; alfangoDB }));
+            };
             case (#UpdateItemInput(updateItemInput)) {
-                return #UpdateItemOutput(Update.updateItem({ updateItemInput; alfangoDB }));
+                let updateResult = Update.updateItem({ updateItemInput; alfangoDB });
+                switch (updateResult) {
+                    case (#ok(res)) {
+                        return #UpdateItemOutput(#ok({
+                            id = updateItemInput.id;
+                            item = res.item;
+                        }));
+                    };
+                    case (#err(errs)) {
+                        return #UpdateItemOutput(#err(errs));
+                    };
+                };
             };
             case (#DeleteDatabaseInput(deleteDatabaseInput)) {
                 return #DeleteDatabaseOutput(Delete.deleteDatabase({ deleteDatabaseInput; alfangoDB }));
@@ -43,13 +57,12 @@ module {
                 return #DeleteItemOutput(Delete.deleteItem({ deleteItemInput; alfangoDB }));
             };
         };
-
     };
 
     public func queryOperation({
         queryOpsInput : InputTypes.QueryOpsInputType;
         alfangoDB : Database.AlfangoDB;
-    }) : OutputTypes.QueryOpsOutputType {
+    }) : async OutputTypes.QueryOpsOutputType {
 
         switch (queryOpsInput) {
             case (#GetTableMetadataInput(getTableMetadataInput)) {
@@ -65,15 +78,15 @@ module {
                 return #GetItemCountOutput(Read.getItemCount({ getItemCountInput; alfangoDB }));
             };
             case (#ScanInput(scanInput)) {
-                return #ScanOutput(Search.scan({ scanInput; alfangoDB }));
+                return #ScanOutput(await Search.scan({ scanInput; alfangoDB }));
             };
             case (#ScanAndGetIdsInput(scanAndGetIdsInput)) {
-                return #ScanAndGetIdsOutput(Search.scanAndGetIds({ scanAndGetIdsInput; alfangoDB }));
+                return #ScanAndGetIdsOutput(await Search.scanAndGetIds({ scanAndGetIdsInput; alfangoDB }));
             };
             case (#PaginatedScanInput(paginatedScanInput)) {
-                return #PaginatedScanOutput(Search.paginatedScan({ paginatedScanInput; alfangoDB }));
+                return #PaginatedScanOutput(await Search.paginatedScan({ paginatedScanInput; alfangoDB }));
             };
-            case (#GetDatabasesInput(getDatabasesInput)) {
+            case (#GetDatabasesInput(_getDatabasesInput)) {
                 return #GetDatabasesOutput(Read.getDatabases(alfangoDB));
             };
         };

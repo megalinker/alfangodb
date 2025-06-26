@@ -8,14 +8,12 @@ import Map "mo:map/Map";
 import Set "mo:map/Set";
 import { thash } "mo:map/Map";
 import Debug "mo:base/Debug";
-import HashMap "mo:base/HashMap";
 import Buffer "mo:base/Buffer";
 import Text "mo:base/Text";
-import Array "mo:base/Array";
-import Option "mo:base/Option";
-import Prelude "mo:base/Prelude";
-import Iter "mo:base/Iter";
 import Time "mo:base/Time";
+import Iter "mo:base/Iter";
+import Vector "mo:vector";
+import BTree "mo:stableheapbtreemap/BTree";
 
 module {
 
@@ -59,61 +57,47 @@ module {
             return #err([remark]);
         };
 
-        ignore do ? {
-            let database = Map.get(databases, thash, createTableInput.databaseName)!;
+        switch (Map.get(databases, thash, createTableInput.databaseName)) {
+            case (null) { return #err(["Database not found"]) };
+            case (?database) {
+                if (Map.has(database.tables, thash, createTableInput.name)) {
+                    let remark = "table already exists: " # debug_show (createTableInput.name);
+                    Debug.print(remark);
+                    return #err([remark]);
+                };
 
-            if (Map.has(database.tables, thash, createTableInput.name)) {
-                let remark = "table already exists: " # debug_show (createTableInput.name);
-                Debug.print(remark);
-                return #err([remark]);
-            };
+                let indexes = Map.new<Text, Database.IndexTable>();
 
-            let indexes = Map.new<Text, Database.IndexTable>();
-
-            for (indexMetadata in createTableInput.indexes.vals()) {
-                Map.set(
-                    indexes,
-                    thash,
-                    indexMetadata.attributeName,
-                    {
-                        attributeName = indexMetadata.attributeName;
-                        items = Map.new<Datatypes.AttributeDataValue, Set.Set<Text>>();
-                    },
-                );
-            };
-
-            for (attributeMetadata in createTableInput.attributes.vals()) {
-                if (attributeMetadata.unique) {
-                    if (not Map.has(indexes, thash, attributeMetadata.name)) {
-                        Map.set(
-                            indexes,
-                            thash,
-                            attributeMetadata.name,
-                            {
-                                attributeName = attributeMetadata.name;
-                                items = Map.new<Datatypes.AttributeDataValue, Set.Set<Text>>();
-                            },
-                        );
+                for (indexMetadata in createTableInput.indexes.vals()) {
+                    let indexTable : Database.IndexTable = {
+                        attributeNames = indexMetadata.attributeNames;
+                        items = BTree.init<Text, Set.Set<Text>>(null);
                     };
+                    Map.set(indexes, thash, indexMetadata.name, indexTable);
                 };
-            };
 
-            let table : Database.Table = {
-                name = createTableInput.name;
-                metadata = {
-                    attributesMap = Map.fromIter<Text, Database.AttributeMetadata>(Array.map<Database.AttributeMetadata, (Text, Database.AttributeMetadata)>(createTableInput.attributes, func attributeMetadata = (attributeMetadata.name, attributeMetadata)).vals(), thash);
-                    indexes = createTableInput.indexes;
+                let table : Database.Table = {
+                    name = createTableInput.name;
+                    metadata = {
+                        attributesMap = Map.fromIter<Text, Database.AttributeMetadata>(
+                            Iter.map<Database.AttributeMetadata, (Text, Database.AttributeMetadata)>(
+                                createTableInput.attributes.vals(),
+                                func attributeMetadata = (attributeMetadata.name, attributeMetadata),
+                            ),
+                            thash,
+                        );
+                        var indexes = Vector.fromArray(createTableInput.indexes);
+                    };
+                    items = Map.new<Text, Database.Item>();
+                    indexes = indexes;
+                    var pendingJobs = Vector.new<Database.PendingJob>();
                 };
-                items = Map.new<Text, Database.Item>();
-                indexes;
-            };
 
-            Map.set(database.tables, thash, table.name, table);
-            Debug.print("table created with name: " # debug_show (table.name));
-            return #ok({});
+                Map.set(database.tables, thash, table.name, table);
+                Debug.print("table created with name: " # debug_show (table.name));
+                return #ok({});
+            };
         };
-
-        Prelude.unreachable();
     };
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -122,97 +106,122 @@ module {
         createItemInput : InputTypes.CreateItemInputType;
         alfangoDB : Database.AlfangoDB;
     }) : async OutputTypes.CreateItemOutputType {
-
         let databases = alfangoDB.databases;
 
+        // 1. Ensure the database exists
         if (not Map.has(databases, thash, createItemInput.databaseName)) {
-            let remark = "database does not exist: " # debug_show (createItemInput.databaseName);
+            let remark : Text = "database does not exist: " # debug_show (createItemInput.databaseName);
             Debug.print(remark);
             return #err([remark]);
         };
 
-        let errorBuffer = Buffer.Buffer<Text>(0);
-        ignore do ? {
-            let database = Map.get(databases, thash, createItemInput.databaseName)!;
-
-            if (not Map.has(database.tables, thash, createItemInput.tableName)) {
-                errorBuffer.add("table does not exist: " # debug_show (createItemInput.tableName));
-                Debug.print("error(s) creating item: " # debug_show (Buffer.toArray(errorBuffer)));
-                return #err(Buffer.toArray(errorBuffer));
+        // 2. Unwrap the database
+        let database = switch (Map.get(databases, thash, createItemInput.databaseName)) {
+            case null {
+                let remark : Text = "Database not found";
+                Debug.print(remark);
+                return #err([remark]);
             };
-
-            let table = Map.get(database.tables, thash, createItemInput.tableName)!;
-            let attributeDataValueMap = HashMap.fromIter<Text, Datatypes.AttributeDataValue>(createItemInput.attributeDataValues.vals(), 0, Text.equal, Text.hash);
-
-            //////////////////////////////// START VALIDATION ////////////////////////////////
-
-            let { isValidAttributesDataType } = Commons.validateAttributeDataTypes({
-                attributeKeyDataValues = createItemInput.attributeDataValues;
-                attributeNameToMetadataMap = table.metadata.attributesMap;
-            });
-            if (not isValidAttributesDataType) {
-                errorBuffer.add("At least one attribute has wrong data-type");
-            };
-
-            let { requiredAttributesPresent } = validateRequiredAttributes({
-                attributeDataValues = createItemInput.attributeDataValues;
-                tableMetadata = table.metadata;
-            });
-            if (not requiredAttributesPresent) {
-                errorBuffer.add("At least one required attribute is missing");
-            };
-
-            let { uniqueAttributesUnique } = Commons.validateUniqueAttributes({
-                attributeKeyDataValues = createItemInput.attributeDataValues;
-                indexes = table.indexes;
-                tableMetadata = table.metadata;
-                itemIdToIgnore = null;
-            });
-            if (not uniqueAttributesUnique) {
-                errorBuffer.add("At least one unique attribute is not unique");
-            };
-
-            if (errorBuffer.size() > 0) {
-                Debug.print("error(s) creating item: " # debug_show (Buffer.toArray(errorBuffer)));
-                return #err(Buffer.toArray(errorBuffer));
-            };
-
-            ////////////////////////////////   END VALIDATION    ////////////////////////////////
-
-            let newItemId = await Utils.generateULIDAsync();
-
-            for (indexTable in Map.vals(table.indexes)) {
-                let attributeName = indexTable.attributeName;
-
-                switch (attributeDataValueMap.get(attributeName)) {
-                    case (null) {};
-                    case (?attributeValue) {
-                        let indexItems = indexTable.items;
-                        let idSet = Option.get(Map.get(indexItems, Utils.DataTypeValueHashUtils, attributeValue), Set.new<Text>());
-                        if (Set.size(idSet) == 0) {
-                            Map.set(indexItems, Utils.DataTypeValueHashUtils, attributeValue, idSet);
-                        };
-                        Set.add(idSet, thash, newItemId);
-                    };
-                };
-            };
-
-            let item : Database.Item = {
-                id = newItemId;
-                attributeDataValueMap = Map.fromIter<Text, Datatypes.AttributeDataValue>(Iter.fromArray(createItemInput.attributeDataValues), thash);
-                createdAt = Time.now();
-                var updatedAt = Time.now();
-            };
-
-            Map.set(table.items, thash, item.id, item);
-            Debug.print("item created with id: " # debug_show (item.id));
-            return #ok({
-                id = item.id;
-                item = Map.toArray(item.attributeDataValueMap);
-            });
+            case (?db) { db };
         };
 
-        Prelude.unreachable();
+        // 3. Ensure the table exists
+        let table = switch (Map.get(database.tables, thash, createItemInput.tableName)) {
+            case null {
+                let remark : Text = "table does not exist: " # debug_show (createItemInput.tableName);
+                Debug.print(remark);
+                return #err([remark]);
+            };
+            case (?tbl) { tbl };
+        };
+
+        // 4. Validate attribute data
+        let errorBuffer = Buffer.Buffer<Text>(0);
+        let itemDataMap = Map.fromIter<Text, Datatypes.AttributeDataValue>(
+            createItemInput.attributeDataValues.vals(),
+            thash,
+        );
+
+        let { isValidAttributesDataType } = Commons.validateAttributeDataTypes({
+            attributeKeyDataValues = createItemInput.attributeDataValues;
+            attributeNameToMetadataMap = table.metadata.attributesMap;
+        });
+        if (not isValidAttributesDataType) {
+            errorBuffer.add("At least one attribute has wrong data-type");
+        };
+
+        let { requiredAttributesPresent } = validateRequiredAttributes({
+            attributeDataValues = createItemInput.attributeDataValues;
+            tableMetadata = table.metadata;
+        });
+        if (not requiredAttributesPresent) {
+            errorBuffer.add("At least one required attribute is missing");
+        };
+
+        let { areConstraintsMet; violatedAttributes } = Commons.validateUniqueConstraints({
+            itemDataMap = itemDataMap;
+            table = table;
+            itemIdToIgnore = null;
+        });
+        if (not areConstraintsMet) {
+            switch (violatedAttributes) {
+                case null {
+                    errorBuffer.add("A unique constraint was violated.");
+                };
+                case (?attrs) {
+                    errorBuffer.add(
+                        "Unique constraint violation on attributes: " # debug_show (attrs)
+                    );
+                };
+            };
+        };
+
+        if (errorBuffer.size() > 0) {
+            let errs = Buffer.toArray(errorBuffer);
+            Debug.print("error(s) creating item: " # debug_show (errs));
+            return #err(errs);
+        };
+
+        // 5. Enforce global memory budget
+        let newItemSize = Utils.calculateItemSize(itemDataMap);
+        if (alfangoDB.totalStableBytes + newItemSize > alfangoDB.STABLE_MEMORY_LIMIT) {
+            let remark : Text = "Stable memory limit reached. Cannot create new item.";
+            Debug.print(remark);
+            return #err([remark]);
+        };
+        alfangoDB.totalStableBytes += newItemSize;
+
+        // 6. Generate ID and update indexes
+        let newItemId = await Utils.generateULIDAsync();
+        for ((indexName, indexTable) in Map.entries(table.indexes)) {
+            switch (Utils.generateCompoundKey(itemDataMap, indexTable.attributeNames)) {
+                case null { /* missing attributes for this index, skip */ };
+                case (?compoundKey) {
+                    let idSet = switch (BTree.get(indexTable.items, Text.compare, compoundKey)) {
+                        case null { Set.new<Text>() };
+                        case (?existing) { existing };
+                    };
+                    Set.add(idSet, thash, newItemId);
+                    ignore BTree.insert(indexTable.items, Text.compare, compoundKey, idSet);
+                };
+            };
+        };
+
+        // 7. Create the item
+        let item : Database.Item = {
+            id = newItemId;
+            var attributeDataValueMap = itemDataMap;
+            createdAt = Time.now();
+            var updatedAt = Time.now();
+        };
+        Map.set(table.items, thash, item.id, item);
+        Debug.print("item created with id: " # debug_show (item.id));
+
+        // 8. Return success
+        return #ok({
+            id = item.id;
+            item = Map.toArray(item.attributeDataValueMap);
+        });
     };
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -224,7 +233,7 @@ module {
         actualRequiredAttributes : [Text];
         requiredAttributesPresent : Bool;
     } {
-        let expectedRequiredAttributesMap = Map.filter<Text, Database.AttributeMetadata>(tableMetadata.attributesMap, thash, func _acceptEntry(_attributeName : Text, attributeMetadata : Database.AttributeMetadata) : Bool { attributeMetadata.required });
+        let expectedRequiredAttributesMap = Map.filter<Text, Database.AttributeMetadata>(tableMetadata.attributesMap, thash, func _acceptEntry(_attributeNames : Text, attributeMetadata : Database.AttributeMetadata) : Bool { attributeMetadata.required });
         let actualRequiredAttributes = Buffer.Buffer<Text>(0);
 
         for ((attributeName, _) in attributeDataValues.vals()) {

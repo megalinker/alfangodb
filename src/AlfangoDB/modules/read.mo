@@ -7,6 +7,8 @@ import Debug "mo:base/Debug";
 import Prelude "mo:base/Prelude";
 import Iter "mo:base/Iter";
 import Buffer "mo:base/Buffer";
+import Int "mo:base/Int";
+import Vector "mo:vector";
 
 module {
 
@@ -15,10 +17,8 @@ module {
         alfangoDB : Database.AlfangoDB;
     }) : OutputTypes.GetTableMetadataOutputType {
 
-        // get databases
         let databases = alfangoDB.databases;
 
-        // check if database exists
         if (not Map.has(databases, thash, getTableMetadataInput.databaseName)) {
             Debug.print("database does not exist");
             return null;
@@ -27,7 +27,6 @@ module {
         ignore do ? {
             let database = Map.get(databases, thash, getTableMetadataInput.databaseName)!;
 
-            // check if table exists
             if (not Map.has(database.tables, thash, getTableMetadataInput.tableName)) {
                 Debug.print("table does not exist");
                 return null;
@@ -40,7 +39,7 @@ module {
                 tableName = getTableMetadataInput.tableName;
                 metadata = {
                     attributes = Iter.toArray(Map.vals(table.metadata.attributesMap));
-                    indexes = table.metadata.indexes;
+                    indexes = Vector.toArray(table.metadata.indexes);
                 };
             };
         };
@@ -175,7 +174,7 @@ module {
             let table = Map.get(database.tables, thash, getItemCountInput.tableName)!;
 
             return #ok({
-                count = Map.size(table.items);
+                count = Int.abs(Map.size(table.items));
             });
         };
 

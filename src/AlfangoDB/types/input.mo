@@ -23,6 +23,12 @@ module {
         attributeDataValues : [(Text, Datatypes.AttributeDataValue)];
     };
 
+    public type CreateIndexInputType = {
+        databaseName : Text;
+        tableName : Text;
+        index : Database.TableIndexMetadata;
+    };
+
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     public type GetTableMetadataInputType = {
@@ -52,7 +58,7 @@ module {
     public type ScanInputType = {
         databaseName : Text;
         tableName : Text;
-        filterExpressions : [SearchTypes.FilterExpressionType];
+        filter : SearchTypes.QueryFilter;
     };
 
     public type ScanAndGetIdsInputType = ScanInputType;
@@ -60,9 +66,9 @@ module {
     public type PaginatedScanInputType = {
         databaseName : Text;
         tableName : Text;
-        filterExpressions : [SearchTypes.FilterExpressionType];
-        offset : Nat;
+        filter : SearchTypes.QueryFilter;
         limit : Nat;
+        cursor : ?SearchTypes.PaginatedScanCursor;
     };
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -115,6 +121,7 @@ module {
         #AddAttributeInput : AddAttributeInputType;
         #DropAttributeInput : DropAttributeInputType;
         #CreateItemInput : CreateItemInputType;
+        #CreateIndexInput : CreateIndexInputType;
         #UpdateItemInput : UpdateItemInputType;
         #DeleteDatabaseInput : DeleteDatabaseInputType;
         #DeleteTableInput : DeleteTableInputType;
