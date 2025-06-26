@@ -1,6 +1,7 @@
 import InputTypes "../types/input";
 import OutputTypes "../types/output";
 import Database "../types/database";
+import Datatype "../types/datatype";
 import Commons "commons";
 import Utils "../utils";
 import Buffer "mo:base/Buffer";
@@ -8,6 +9,9 @@ import Debug "mo:base/Debug";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
 import Array "mo:base/Array";
+import Nat64 "mo:base/Nat64";
+import Int "mo:base/Int";
+import HashMap "mo:base/HashMap";
 import Map "mo:map/Map";
 import Set "mo:map/Set";
 import { thash } "mo:map/Map";
@@ -20,15 +24,10 @@ module {
         addAttributeInput : InputTypes.AddAttributeInputType;
         alfangoDB : Database.AlfangoDB;
     }) : OutputTypes.AddAttributeOutputType {
-
-        let databases = alfangoDB.databases;
-
-        if (not Map.has(databases, thash, addAttributeInput.databaseName)) {
-            return #err(["database does not exist"]);
-        };
-
-        switch (Map.get(databases, thash, addAttributeInput.databaseName)) {
-            case (null) { return #err(["Database not found"]) };
+        switch (Map.get(alfangoDB.databases, thash, addAttributeInput.databaseName)) {
+            case (null) {
+                return #err(["database does not exist"]);
+            };
             case (?database) {
                 switch (Map.get(database.tables, thash, addAttributeInput.tableName)) {
                     case (null) {
@@ -60,32 +59,26 @@ module {
         alfangoDB : Database.AlfangoDB;
     }) : OutputTypes.DropAttributeOutputType {
 
-        let databases = alfangoDB.databases;
         let { databaseName; tableName; attributeName } = dropAttributeInput;
 
-        if (not Map.has(databases, thash, databaseName)) {
-            return #err(["database does not exist"]);
-        };
-
-        switch (Map.get(databases, thash, databaseName)) {
-            case (null) { return #err(["Database not found (unreachable)"]) };
+        switch (Map.get(alfangoDB.databases, thash, databaseName)) {
+            case (null) {
+                return #err(["database does not exist"]);
+            };
             case (?database) {
                 switch (Map.get(database.tables, thash, tableName)) {
                     case (null) {
                         return #err(["table '" # tableName # "' does not exist"]);
                     };
                     case (?table) {
-                        // 1. Validate that the attribute exists on the table.
                         if (not Map.has(table.metadata.attributesMap, thash, attributeName)) {
                             return #err(["attribute '" # attributeName # "' does not exist"]);
                         };
 
-                        // 2. Find all indexes that contain the dropped attribute and remove them.
                         let remainingIndexes = Buffer.Buffer<Database.TableIndexMetadata>(0);
                         let indexesToDrop = Buffer.Buffer<Database.TableIndexMetadata>(0);
 
                         for (indexMetadata in Vector.vals(table.metadata.indexes)) {
-                            // Check if the attributeName exists in the index's attribute list
                             let isAffected = Array.find<Text>(
                                 indexMetadata.attributeNames,
                                 func(name) { name == attributeName },
@@ -98,26 +91,21 @@ module {
                             };
                         };
 
-                        // 3. Perform the deletion of the affected indexes.
                         for (indexMeta in indexesToDrop.vals()) {
                             Debug.print(
                                 "Dropping index '" # indexMeta.name #
                                 "' on table '" # tableName #
                                 "' as it contains the dropped attribute '" # attributeName # "'."
                             );
-                            // Delete the index B-Tree data
                             Map.delete(table.indexes, thash, indexMeta.name);
                         };
 
-                        // Update the table's index metadata to only contain the unaffected indexes.
                         table.metadata.indexes := Vector.fromIter(remainingIndexes.vals());
 
-                        // 4. Remove the attribute's metadata from the table definition.
                         Map.delete(table.metadata.attributesMap, thash, attributeName);
 
-                        // 5. Schedule the background job to remove the attribute data from all existing items.
                         let newJob : Database.PendingJob = #DropAttribute({
-                            attributeNames = attributeName; // Note: The job type still uses `attributeNames`
+                            attributeNames = attributeName;
                             var lastProcessedId = null;
                             var isComplete = false;
                         });
@@ -153,29 +141,66 @@ module {
                 switch (Map.get(database.tables, thash, updateItemInput.tableName)) {
                     case (null) { return #err(["table not found"]) };
                     case (?table) {
-                        switch (Map.get(table.items, thash, updateItemInput.id)) {
+                        switch (BTree.get(table.items, Text.compare, updateItemInput.id)) {
                             case (null) { return #err(["item not found"]) };
                             case (?item) {
-                                // --- All items found, now perform validation BEFORE any state change ---
 
-                                // Create the potential new state of the item in a temporary map
-                                let newItemDataMap = Map.clone(item.attributeDataValueMap);
+                                // 1a. Calculate the memory delta efficiently by only looking at the patch.
+                                var sizeDelta : Int = 0;
+                                for ((attrName, newAttrValue) in updateItemInput.attributeDataValues.vals()) {
+                                    let oldAttrValue = Map.get(item.attributeDataValueMap, thash, attrName);
+                                    let newSize = Utils.calculateAttributeDataValueSize(newAttrValue);
+
+                                    switch (oldAttrValue) {
+                                        case (null) {
+                                            sizeDelta += Text.size(attrName);
+                                            sizeDelta += Nat64.toNat(newSize);
+                                        };
+                                        case (?oldVal) {
+                                            let oldSize = Utils.calculateAttributeDataValueSize(oldVal);
+                                            sizeDelta += (Nat64.toNat(newSize) - Nat64.toNat(oldSize));
+                                        };
+                                    };
+                                };
+
+                                // 1b. Perform the memory limit check using the efficient delta.
+                                if (sizeDelta > 0) {
+                                    let sizeIncrease = Int.abs(sizeDelta);
+                                    if (alfangoDB.totalStableBytes + Nat64.fromNat(sizeIncrease) > alfangoDB.STABLE_MEMORY_LIMIT) {
+                                        return #err(["Stable memory limit reached. Cannot update item."]);
+                                    };
+                                };
+
+                                // 1c. Validate data types for the attributes in the patch.
                                 for ((attrName, attrValue) in updateItemInput.attributeDataValues.vals()) {
-                                    Map.set(newItemDataMap, thash, attrName, attrValue);
+                                    switch (Map.get(table.metadata.attributesMap, thash, attrName)) {
+                                        case (?attrMeta) {
+                                            let { isValidAttributeDataType } = Commons.validateAttributeDataType({
+                                                attributeDataValue = attrValue;
+                                                expectedAttributeDataType = attrMeta.dataType;
+                                            });
+                                            if (not isValidAttributeDataType) {
+                                                return #err(["Attribute '" # attrName # "' has wrong data-type"]);
+                                            };
+                                        };
+                                        case (null) {
+                                            return #err(["Attribute '" # attrName # "' does not exist in table"]);
+                                        };
+                                    };
                                 };
 
-                                // Validate data types
-                                let { isValidAttributesDataType } = Commons.validateAttributeDataTypes({
-                                    attributeKeyDataValues = updateItemInput.attributeDataValues;
-                                    attributeNameToMetadataMap = table.metadata.attributesMap;
-                                });
-                                if (not isValidAttributesDataType) {
-                                    return #err(["At least one update attribute has wrong data-type"]);
-                                };
+                                // 1d. Validate data types for the attributes in the patch
+                                let patchData = HashMap.fromIter<Text, Datatype.AttributeDataValue>(
+                                    updateItemInput.attributeDataValues.vals(),
+                                    updateItemInput.attributeDataValues.size(),
+                                    Text.equal,
+                                    Text.hash,
+                                );
 
-                                // Validate unique constraints against the potential new state
+                                // 1e. Validate unique constraints against the potential new state
                                 let { areConstraintsMet; violatedAttributes } = Commons.validateUniqueConstraints({
-                                    itemDataMap = newItemDataMap;
+                                    originalItemData = item.attributeDataValueMap;
+                                    patchData = patchData;
                                     table = table;
                                     itemIdToIgnore = ?updateItemInput.id;
                                 });
@@ -183,40 +208,29 @@ module {
                                     return #err(["Unique constraint violation on attributes: " # debug_show (violatedAttributes)]);
                                 };
 
-                                let oldItemSize = Utils.calculateItemSize(item.attributeDataValueMap);
-                                let newItemSize = Utils.calculateItemSize(newItemDataMap);
-
-                                if (newItemSize > oldItemSize) {
-                                    // Item grew in size
-                                    let sizeIncrease : Nat64 = newItemSize - oldItemSize;
-                                    if (alfangoDB.totalStableBytes + sizeIncrease > alfangoDB.STABLE_MEMORY_LIMIT) {
-                                        return #err(["Stable memory limit reached. Cannot update item."]);
-                                    };
-                                };
-
-                                // --- PHASE 2: COMMIT STATE CHANGES (Synchronous & Atomic-like) ---
+                                // --- PHASE 2: COMMIT STATE CHANGES (Atomic-like) ---
                                 // All validations have passed. Now we perform all state changes.
-                                // If any of these trap, the whole message is rolled back.
 
-                                // 2a. Update memory usage (now using safe Nat64 math)
-                                if (newItemSize > oldItemSize) {
-                                    let sizeIncrease : Nat64 = newItemSize - oldItemSize;
-                                    alfangoDB.totalStableBytes += sizeIncrease;
-                                } else if (oldItemSize > newItemSize) {
-                                    let sizeDecrease : Nat64 = oldItemSize - newItemSize;
-                                    // Guard against underflow, although it shouldn't happen in a consistent state.
+                                // 2a. Update memory usage using the pre-calculated delta
+                                if (sizeDelta > 0) {
+                                    alfangoDB.totalStableBytes += Nat64.fromNat(Int.abs(sizeDelta));
+                                } else if (sizeDelta < 0) {
+                                    let sizeDecrease = Nat64.fromNat(Int.abs(-sizeDelta));
                                     if (alfangoDB.totalStableBytes >= sizeDecrease) {
                                         alfangoDB.totalStableBytes -= sizeDecrease;
                                     } else {
                                         alfangoDB.totalStableBytes := 0;
                                     };
                                 };
-                                // If sizes are equal, do nothing.
 
                                 // 2b. Update indexes
                                 for ((indexName, indexTable) in Map.entries(table.indexes)) {
-                                    let oldCompoundKey = Utils.generateCompoundKey(item.attributeDataValueMap, indexTable.attributeNames);
-                                    let newCompoundKey = Utils.generateCompoundKey(newItemDataMap, indexTable.attributeNames);
+                                    let oldCompoundKey = Utils.generateCompoundKey(
+                                        item.attributeDataValueMap,
+                                        HashMap.HashMap<Text, Datatype.AttributeDataValue>(0, Text.equal, Text.hash),
+                                        indexTable.attributeNames
+                                    );
+                                    let newCompoundKey = Utils.generateCompoundKey(item.attributeDataValueMap, patchData, indexTable.attributeNames);
 
                                     if (oldCompoundKey != newCompoundKey) {
                                         // Delete the old index entry
@@ -254,8 +268,17 @@ module {
                                     };
                                 };
 
-                                // 2c. Update the item data itself
-                                item.attributeDataValueMap := newItemDataMap;
+                                // 2c. Update the item data and its cached size
+                                if (sizeDelta > 0) {
+                                    item.sizeInBytes += Nat64.fromNat(Int.abs(sizeDelta));
+                                } else if (sizeDelta < 0) {
+                                    let sizeDecrease = Nat64.fromNat(Int.abs(-sizeDelta));
+                                    if (item.sizeInBytes >= sizeDecrease) {
+                                        item.sizeInBytes -= sizeDecrease;
+                                    } else {
+                                        item.sizeInBytes := 0;
+                                    };
+                                };
                                 item.updatedAt := Time.now();
 
                                 Debug.print("item updated with id: " # debug_show (updateItemInput.id));
@@ -276,15 +299,12 @@ module {
         alfangoDB : Database.AlfangoDB;
     }) : OutputTypes.CreateIndexOutputType {
 
-        let databases = alfangoDB.databases;
         let { databaseName; tableName; index } = createIndexInput;
 
-        if (not Map.has(databases, thash, databaseName)) {
-            return #err(["database does not exist"]);
-        };
-
-        switch (Map.get(databases, thash, databaseName)) {
-            case (null) { return #err(["Database not found"]) };
+        switch (Map.get(alfangoDB.databases, thash, databaseName)) {
+            case (null) {
+                return #err(["database does not exist"]);
+            };
             case (?database) {
                 switch (Map.get(database.tables, thash, tableName)) {
                     case (null) {
@@ -319,7 +339,7 @@ module {
                         };
                         Map.set(table.indexes, thash, index.name, newIndexTable);
 
-                        if (Map.size(table.items) > 0) {
+                        if (BTree.size(table.items) > 0) {
                             let newJob : Database.PendingJob = #BuildIndex({
                                 indexName = index.name;
                                 var lastProcessedId = null;

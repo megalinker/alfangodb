@@ -26,6 +26,7 @@ module {
     type FilterExpressionConditionType = SearchTypes.FilterExpressionConditionType;
     type FilterExpressionType = SearchTypes.FilterExpressionType;
     type ContaintmentExpressionAttributeDataValue = SearchTypes.ContaintmentExpressionAttributeDataValue;
+    let UNBOUNDED_UPPER_KEY = "\u{10FFFF}";
 
     public type QueryPlan = {
         #IndexScan : {
@@ -57,70 +58,72 @@ module {
         nextCursor : ?SearchTypes.PaginatedScanCursor;
     } {
         let resultsBuffer = Buffer.Buffer<OutputTypes.ItemOutputType>(0);
-        let keyIterator = Map.keys(table.items);
-        var continueProcessing = true;
+        var continueScanning = true;
         var lastProcessedId : ?Text = cursor;
 
-        if (cursor != null) {
-            let cursorId = switch cursor {
-                case (?id) id;
-                case (null) Prelude.unreachable();
+        label scan_loop while (continueScanning and resultsBuffer.size() <= limit) {
+            let startKey = switch (lastProcessedId) {
+                case null { "" };
+                case (?id) { id };
             };
-            var foundCursor = false;
-            while (continueProcessing and not foundCursor) {
-                switch (keyIterator.next()) {
-                    case (null) { continueProcessing := false };
-                    case (?key) {
-                        if (key == cursorId) { foundCursor := true };
+
+            // Scan a batch from the main items B-Tree.
+            let scanResult = BTree.scanLimit<Text, Database.Item>(
+                table.items,
+                Text.compare,
+                startKey,
+                UNBOUNDED_UPPER_KEY,
+                #fwd,
+                FULL_SCAN_INTERNAL_BATCH_SIZE,
+            );
+
+            if (scanResult.results.size() == 0) {
+                continueScanning := false;
+                continue scan_loop;
+            };
+
+            var itemsToProcess = scanResult.results;
+            if (lastProcessedId != null and itemsToProcess.size() > 0 and itemsToProcess[0].0 == startKey) {
+                // Skip the cursor item from the previous page.
+                itemsToProcess := Iter.toArray(Array.slice(itemsToProcess, 1, itemsToProcess.size()));
+            };
+
+            if (itemsToProcess.size() == 0) {};
+
+            for ((itemId, item) in itemsToProcess.vals()) {
+                lastProcessedId := ?itemId;
+                if (evaluateFilter(item, filter)) {
+                    resultsBuffer.add({
+                        id = item.id;
+                        item = Map.toArray(item.attributeDataValueMap);
+                    });
+                    if (resultsBuffer.size() > limit) {
+                        break scan_loop;
                     };
                 };
             };
-            if (not foundCursor) { continueProcessing := false };
-        };
 
-        var itemsScannedInBatch : Nat = 0;
-        while (
-            continueProcessing and
-            itemsScannedInBatch < FULL_SCAN_INTERNAL_BATCH_SIZE and
-            resultsBuffer.size() < limit
-        ) {
-            itemsScannedInBatch += 1;
-            switch (keyIterator.next()) {
-                case (null) {
-                    continueProcessing := false;
-                };
-                case (?itemId) {
-                    lastProcessedId := ?itemId;
-                    switch (Map.get(table.items, thash, itemId)) {
-                        case (null) { /* item was deleted, skip */ };
-                        case (?item) {
-                            if (evaluateFilter(item, filter)) {
-                                resultsBuffer.add({
-                                    id = item.id;
-                                    item = Map.toArray(item.attributeDataValueMap);
-                                });
-                            };
-                        };
-                    };
-                };
+            if (scanResult.results.size() < FULL_SCAN_INTERNAL_BATCH_SIZE) {
+                // We've reached the end of the table.
+                continueScanning := false;
             };
         };
 
+        let hasMore = resultsBuffer.size() > limit;
+        var itemsToReturn = Buffer.toArray(resultsBuffer);
         var nextCursor : ?SearchTypes.PaginatedScanCursor = null;
-        if (continueProcessing and lastProcessedId != null) {
-            switch (lastProcessedId) {
-                case (?id) {
-                    nextCursor := ?{
-                        plan = #FullTableScan({ filter });
-                        lastId = id;
-                    };
-                };
-                case (null) {};
+
+        if (hasMore) {
+            let lastId = itemsToReturn[limit - 1].id;
+            nextCursor := ?{
+                plan = #FullTableScan({ filter });
+                lastId = lastId;
             };
+            itemsToReturn := Iter.toArray(Array.slice(itemsToReturn, 0, limit));
         };
 
         return {
-            items = Buffer.toArray(resultsBuffer);
+            items = itemsToReturn;
             nextCursor = nextCursor;
         };
     };
@@ -141,102 +144,128 @@ module {
         let { indexName; scanBounds; remainingFilter } = plan;
 
         let indexTable = switch (Map.get(table.indexes, thash, indexName)) {
-            case (null) { Prelude.unreachable() };
+            case null { Prelude.unreachable() };
             case (?idx) { idx };
         };
 
-        let startKey = switch (cursorItemId) {
-            case (null) { scanBounds.lower };
-            case (?_) { scanBounds.lower };
-        };
-
-        let scanResult = BTree.scanLimit<Text, Set.Set<Text>>(
-            indexTable.items,
-            Text.compare,
-            startKey,
-            scanBounds.upper,
-            #fwd,
-            INDEX_SCAN_INTERNAL_BATCH_SIZE,
-        );
-
         let resultsBuffer = Buffer.Buffer<OutputTypes.ItemOutputType>(0);
-        var lastProcessedItemId : ?Text = cursorItemId;
-        var continueProcessing = true;
-        var pastCursor = (cursorItemId == null);
+        var continueScanningIndex = true;
+        var indexCursor : ?Text = ?scanBounds.lower;
+        var pastItemCursor = (cursorItemId == null);
 
-        if (scanResult.results.size() > 0) {
-            label outer_loop for ((compoundKey, idSet) in scanResult.results.vals()) {
-                let sortedIds = Array.sort<Text>(Iter.toArray(Set.keys(idSet)), Text.compare);
+        // label the outer while
+        label scan_loop while (continueScanningIndex and resultsBuffer.size() <= limit) {
+            let lowerBound = switch (indexCursor) {
+                case (?c) { c };
+                case null { scanBounds.lower };
+            };
 
-                label inner_loop for (itemId in sortedIds.vals()) {
+            let scanResult = BTree.scanLimit<Text, Set.Set<Text>>(
+                indexTable.items,
+                Text.compare,
+                lowerBound,
+                scanBounds.upper,
+                #fwd,
+                INDEX_SCAN_INTERNAL_BATCH_SIZE,
+            );
 
-                    if (not pastCursor) {
+            // nothing more in the index
+            if (scanResult.results.size() == 0) {
+                continueScanningIndex := false;
+                continue scan_loop;
+            };
+
+            var lastProcessedKeyInBatch : Text = "";
+
+            // label the loop over index entries
+            label key_loop for ((compoundKey, idSet) in scanResult.results.vals()) {
+                lastProcessedKeyInBatch := compoundKey;
+
+                // skip until we pass the cursor item
+                if (compoundKey == lowerBound and not pastItemCursor) {
+                    // (we’ll catch up on the first id_loop below)
+                };
+
+                // label the inner loop over all item-IDs in this set
+                label id_loop for (itemId in Set.keys(idSet)) {
+                    if (not pastItemCursor) {
+                        // only start collecting once we’ve moved past the cursorItemId
                         switch (cursorItemId) {
-                            case (?cursorId) {
-                                if (itemId == cursorId) {
-                                    pastCursor := true;
-                                };
+                            case (?cId) if (itemId == cId) {
+                                pastItemCursor := true;
                             };
-                            case (null) {};
+                            case (_) {};
                         };
-                        continue inner_loop;
+                        if (not pastItemCursor) {
+                            continue id_loop;
+                        };
                     };
 
-                    if (resultsBuffer.size() >= limit) {
-                        continueProcessing := false;
-                        break outer_loop;
-                    };
-
-                    switch (Map.get(table.items, thash, itemId)) {
+                    // fetch the real item and apply the remainingFilter
+                    switch (BTree.get(table.items, Text.compare, itemId)) {
                         case (?item) {
                             if (evaluateFilter(item, remainingFilter)) {
                                 resultsBuffer.add({
                                     id = item.id;
                                     item = Map.toArray(item.attributeDataValueMap);
                                 });
+                                // once we have limit+1, we can stop immediately
+                                if (resultsBuffer.size() > limit) {
+                                    break scan_loop;
+                                };
                             };
                         };
-                        case (null) { /* item deleted, skip */ };
+                        case (null) { /* item was deleted; skip */ };
                     };
+                }; // end id_loop
+            }; // end key_loop
 
-                    lastProcessedItemId := ?itemId;
-                };
+            // advance the index cursor for the next batch
+            indexCursor := ?(lastProcessedKeyInBatch # "\u{0}");
+
+            // if we scanned fewer than the batch size, we’re at the end
+            if (scanResult.results.size() < INDEX_SCAN_INTERNAL_BATCH_SIZE) {
+                continueScanningIndex := false;
             };
-        };
+        }; // end scan_loop
 
+        // build the true “hasMore?” logic
+        let hasMore = resultsBuffer.size() > limit;
+        var itemsToReturn = Buffer.toArray(resultsBuffer);
         var nextCursor : ?SearchTypes.PaginatedScanCursor = null;
-        // We have more results if we filled up the internal batch size.
-        if (continueProcessing and scanResult.results.size() == INDEX_SCAN_INTERNAL_BATCH_SIZE and lastProcessedItemId != null) {
-            switch (lastProcessedItemId) {
-                case (?id) {
-                    nextCursor := ?{
-                        plan = #IndexScan(plan);
-                        lastId = id; // The cursor for the next call is the last item ID we processed.
-                    };
-                };
-                case (null) {};
+
+        if (hasMore) {
+            let lastId = itemsToReturn[limit - 1].id;
+            nextCursor := ?{
+                plan = #IndexScan(plan);
+                lastId = lastId;
             };
+            itemsToReturn := Iter.toArray(Array.slice(itemsToReturn, 0, limit));
         };
 
         return {
-            items = Buffer.toArray(resultsBuffer);
+            items = itemsToReturn;
             nextCursor = nextCursor;
         };
     };
 
-    private func _paginatedIndexScanForItems({
+    private func _iterativeIndexScanForItems({
         table : Database.Table;
         indexName : Text;
         scanBounds : { lower : Text; upper : Text };
         remainingFilter : SearchTypes.QueryFilter;
-    }) : async [OutputTypes.ItemOutputType] {
+    }) : [OutputTypes.ItemOutputType] {
         let resultsBuffer = Buffer.Buffer<OutputTypes.ItemOutputType>(0);
         let indexTable = switch (Map.get(table.indexes, thash, indexName)) {
             case (null) { Prelude.unreachable() };
             case (?idx) { idx };
         };
 
-        func processIndexBatch(cursor : ?(Text, Text)) : async () {
+        var continueScanning = true;
+        // The cursor now tracks the last processed compound key and item ID.
+        var cursor : ?(Text, Text) = null;
+
+        label scan_loop while (continueScanning) {
             let (lowerBound, startId) = switch (cursor) {
                 case (null) { (scanBounds.lower, null) };
                 case (?(lastKey, lastId)) { (lastKey, ?lastId) };
@@ -252,27 +281,27 @@ module {
             );
 
             if (scanResult.results.size() == 0) {
-                return;
+                break scan_loop;
             };
 
-            var lastProcessedCursor : ?(Text, Text) = cursor;
+            var lastProcessedInBatch : ?(Text, Text) = cursor;
 
             for ((compoundKey, idSet) in scanResult.results.vals()) {
-                let sortedIds = Array.sort<Text>(Iter.toArray(Set.keys(idSet)), Text.compare);
-
-                for (itemId in sortedIds.vals()) {
+                for (itemId in Set.keys(idSet)) {
                     var processThisItem = true;
                     if (compoundKey == lowerBound) {
                         switch (startId) {
                             case (?s_id) {
-                                if (itemId <= s_id) { processThisItem := false };
+                                if (Text.compare(itemId, s_id) != #greater) {
+                                    processThisItem := false;
+                                };
                             };
                             case (null) {};
                         };
                     };
 
                     if (processThisItem) {
-                        switch (Map.get(table.items, thash, itemId)) {
+                        switch (BTree.get(table.items, Text.compare, itemId)) {
                             case (null) { /* Item deleted, skip */ };
                             case (?item) {
                                 if (evaluateFilter(item, remainingFilter)) {
@@ -284,40 +313,41 @@ module {
                             };
                         };
                     };
-                    lastProcessedCursor := ?(compoundKey, itemId);
+                    lastProcessedInBatch := ?(compoundKey, itemId);
                 };
             };
 
-            switch (cursor, lastProcessedCursor) {
+            switch (cursor, lastProcessedInBatch) {
                 case (?c, ?lc) {
                     if (c.0 == lc.0 and c.1 == lc.1) {
-                        return;
+                        continueScanning := false;
                     };
                 };
                 case (_, _) {};
             };
 
-            await processIndexBatch(lastProcessedCursor);
+            cursor := lastProcessedInBatch;
         };
-
-        await processIndexBatch(null);
 
         return Buffer.toArray(resultsBuffer);
     };
 
-    private func _paginatedIndexScanForIds({
+    private func _iterativeIndexScanForIds({
         table : Database.Table;
         indexName : Text;
         scanBounds : { lower : Text; upper : Text };
         remainingFilter : SearchTypes.QueryFilter;
-    }) : async [Text] {
+    }) : [Text] {
         let resultsBuffer = Buffer.Buffer<Text>(0);
         let indexTable = switch (Map.get(table.indexes, thash, indexName)) {
             case (null) { Prelude.unreachable() };
             case (?idx) { idx };
         };
 
-        func processIndexBatch(cursor : ?(Text, Text)) : async () {
+        var continueScanning = true;
+        var cursor : ?(Text, Text) = null;
+
+        label scan_loop while (continueScanning) {
             let (lowerBound, startId) = switch (cursor) {
                 case (null) { (scanBounds.lower, null) };
                 case (?(lastKey, lastId)) { (lastKey, ?lastId) };
@@ -333,27 +363,27 @@ module {
             );
 
             if (scanResult.results.size() == 0) {
-                return;
+                break scan_loop;
             };
 
-            var lastProcessedCursor : ?(Text, Text) = cursor;
+            var lastProcessedInBatch : ?(Text, Text) = cursor;
 
             for ((compoundKey, idSet) in scanResult.results.vals()) {
-                let sortedIds = Array.sort<Text>(Iter.toArray(Set.keys(idSet)), Text.compare);
-
-                for (itemId in sortedIds.vals()) {
+                for (itemId in Set.keys(idSet)) {
                     var processThisItem = true;
                     if (compoundKey == lowerBound) {
                         switch (startId) {
                             case (?s_id) {
-                                if (itemId <= s_id) { processThisItem := false };
+                                if (Text.compare(itemId, s_id) != #greater) {
+                                    processThisItem := false;
+                                };
                             };
                             case (null) {};
                         };
                     };
 
                     if (processThisItem) {
-                        switch (Map.get(table.items, thash, itemId)) {
+                        switch (BTree.get(table.items, Text.compare, itemId)) {
                             case (null) { /* Item deleted, skip */ };
                             case (?item) {
                                 if (evaluateFilter(item, remainingFilter)) {
@@ -362,23 +392,21 @@ module {
                             };
                         };
                     };
-                    lastProcessedCursor := ?(compoundKey, itemId);
+                    lastProcessedInBatch := ?(compoundKey, itemId);
                 };
             };
 
-            switch (cursor, lastProcessedCursor) {
+            switch (cursor, lastProcessedInBatch) {
                 case (?c, ?lc) {
                     if (c.0 == lc.0 and c.1 == lc.1) {
-                        return;
+                        continueScanning := false;
                     };
                 };
                 case (_, _) {};
             };
 
-            await processIndexBatch(lastProcessedCursor);
+            cursor := lastProcessedInBatch;
         };
-
-        await processIndexBatch(null);
 
         return Buffer.toArray(resultsBuffer);
     };
@@ -618,39 +646,34 @@ module {
             return #err([remark]);
         };
 
-        let result : OutputTypes.ScanOutputType = await async {
-            switch (Map.get(databases, thash, databaseName)) {
-                case (null) { #err(["Database not found"]) };
-                case (?database) {
-                    switch (Map.get(database.tables, thash, tableName)) {
-                        case (null) {
-                            #err(["Table '" # tableName # "' not found"]);
-                        };
-                        case (?table) {
-                            var items : [OutputTypes.ItemOutputType] = [];
-
-                            switch (findIndexableFilter(table, filter)) {
-                                case (null) {
-                                    Debug.print("Scan strategy: Full table scan required, but not supported by this function.");
-                                    #err(["Query is too broad and requires a full table scan. Please use the 'paginatedScan' method for this operation."]);
-                                };
-                                case (?(indexName, scanBounds, remainingFilter)) {
-                                    Debug.print("Scan strategy: Paginated Index range scan on '" # indexName # "'");
-                                    items := await _paginatedIndexScanForItems({
-                                        table = table;
-                                        indexName = indexName;
-                                        scanBounds = scanBounds;
-                                        remainingFilter = remainingFilter;
-                                    });
-                                    #ok(items);
-                                };
+        switch (Map.get(databases, thash, databaseName)) {
+            case (null) { return #err(["Database not found"]) };
+            case (?database) {
+                switch (Map.get(database.tables, thash, tableName)) {
+                    case (null) {
+                        return #err(["Table '" # tableName # "' not found"]);
+                    };
+                    case (?table) {
+                        switch (findIndexableFilter(table, filter)) {
+                            case (null) {
+                                Debug.print("Scan strategy: Full table scan required, but not supported by this function.");
+                                return #err(["Query is too broad and requires a full table scan. Please use the 'paginatedScan' method for this operation."]);
+                            };
+                            case (?(indexName, scanBounds, remainingFilter)) {
+                                Debug.print("Scan strategy: Iterative Index range scan on '" # indexName # "'");
+                                let items = _iterativeIndexScanForItems({
+                                    table = table;
+                                    indexName = indexName;
+                                    scanBounds = scanBounds;
+                                    remainingFilter = remainingFilter;
+                                });
+                                return #ok(items);
                             };
                         };
                     };
                 };
             };
         };
-        return result;
     };
 
     public func scanAndGetIds({
@@ -667,128 +690,33 @@ module {
             return #err([remark]);
         };
 
-        let result : OutputTypes.ScanAndGetIdsOutputType = await async {
-            switch (Map.get(databases, thash, databaseName)) {
-                case (null) { #err(["Database not found"]) };
-                case (?database) {
-                    switch (Map.get(database.tables, thash, tableName)) {
-                        case (null) {
-                            #err(["Table '" # tableName # "' not found"]);
-                        };
-                        case (?table) {
-                            var ids : [Text] = [];
-
-                            switch (findIndexableFilter(table, filter)) {
-                                case (null) {
-                                    Debug.print("scanAndGetIds strategy: Full table scan required, but not supported by this function.");
-                                    #err(["Query is too broad and requires a full table scan. Please use a paginated method for this operation."]);
-                                };
-                                case (?(indexName, scanBounds, remainingFilter)) {
-                                    Debug.print("scanAndGetIds strategy: Paginated Index range scan on '" # indexName # "'");
-                                    ids := await _paginatedIndexScanForIds({
-                                        table = table;
-                                        indexName = indexName;
-                                        scanBounds = scanBounds;
-                                        remainingFilter = remainingFilter;
-                                    });
-                                    #ok({ ids = ids });
-                                };
+        switch (Map.get(databases, thash, databaseName)) {
+            case (null) { return #err(["Database not found"]) };
+            case (?database) {
+                switch (Map.get(database.tables, thash, tableName)) {
+                    case (null) {
+                        return #err(["Table '" # tableName # "' not found"]);
+                    };
+                    case (?table) {
+                        switch (findIndexableFilter(table, filter)) {
+                            case (null) {
+                                Debug.print("scanAndGetIds strategy: Full table scan required, but not supported by this function.");
+                                return #err(["Query is too broad and requires a full table scan. Please use a paginated method for this operation."]);
                             };
-                        };
-                    };
-                };
-            };
-        };
-        return result;
-    };
-
-    private func _executePaginatedFullScan(
-        table : Database.Table,
-        filter : SearchTypes.QueryFilter,
-        limit : Nat,
-        cursor : ?Text,
-    ) : {
-        items : [OutputTypes.ItemOutputType];
-        nextCursor : ?SearchTypes.PaginatedScanCursor;
-        hasMore : Bool;
-    } {
-        let resultsBuffer = Buffer.Buffer<OutputTypes.ItemOutputType>(0);
-        let keyIterator = Map.keys(table.items);
-        var continueProcessing = true;
-        var lastProcessedId : ?Text = null;
-
-        // Fast-forward the iterator to the cursor position
-        if (cursor != null) {
-            let cursorId = switch cursor {
-                case (?id) id;
-                case (null) Prelude.unreachable();
-            };
-            var foundCursor = false;
-            while (continueProcessing and not foundCursor) {
-                switch (keyIterator.next()) {
-                    case (null) { continueProcessing := false };
-                    case (?key) {
-                        if (key == cursorId) {
-                            foundCursor := true;
-                        };
-                    };
-                };
-            };
-            if (not foundCursor) {
-                Debug.print("Warning: Full scan cursor '" # cursorId # "' not found. Scan may be complete or item was deleted.");
-                continueProcessing := false;
-            };
-        };
-
-        // Process a batch of items
-        while (continueProcessing and resultsBuffer.size() < limit) {
-            switch (keyIterator.next()) {
-                case (null) {
-                    continueProcessing := false;
-                };
-                case (?itemId) {
-                    lastProcessedId := ?itemId;
-                    switch (Map.get(table.items, thash, itemId)) {
-                        case (null) { /* item deleted, skip */ };
-                        case (?item) {
-                            if (evaluateFilter(item, filter)) {
-                                resultsBuffer.add({
-                                    id = item.id;
-                                    item = Map.toArray(item.attributeDataValueMap);
+                            case (?(indexName, scanBounds, remainingFilter)) {
+                                Debug.print("scanAndGetIds strategy: Iterative Index range scan on '" # indexName # "'");
+                                let ids = _iterativeIndexScanForIds({
+                                    table = table;
+                                    indexName = indexName;
+                                    scanBounds = scanBounds;
+                                    remainingFilter = remainingFilter;
                                 });
+                                return #ok({ ids = ids });
                             };
                         };
                     };
                 };
             };
-        };
-
-        // Determine if there are more items and create the next cursor
-        var hasMore = false;
-        var nextCursor : ?SearchTypes.PaginatedScanCursor = null;
-        if (continueProcessing) {
-            // If we broke the loop because the buffer is full, there might be more items.
-            // We peek at the next item to be sure.
-            if (keyIterator.next() != null) {
-                hasMore := true;
-                if (lastProcessedId != null) {
-                    switch (lastProcessedId) {
-                        case (?id) {
-                            nextCursor := ?{
-                                plan = #FullTableScan({ filter });
-                                lastId = id;
-                            };
-                        };
-                        case (null) {};
-                    };
-                };
-            };
-        };
-
-        return {
-            items = Buffer.toArray(resultsBuffer);
-            nextCursor = nextCursor;
-            hasMore = hasMore;
         };
     };
 

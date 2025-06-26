@@ -1,4 +1,5 @@
 import Database "../types/database";
+import Datatypes "../types/datatype";
 import Map "mo:map/Map";
 import { thash } "mo:map/Map";
 import Text "mo:base/Text";
@@ -6,6 +7,7 @@ import Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
 import Buffer "mo:base/Buffer";
 import Nat64 "mo:base/Nat64";
+import HashMap "mo:base/HashMap";
 import Vector "mo:vector";
 import BTree "mo:stableheapbtreemap/BTree";
 import Utils "../utils";
@@ -14,6 +16,7 @@ import Set "mo:map/Set";
 module {
 
     let BATCH_SIZE : Nat = 100;
+    let UNBOUNDED_UPPER_KEY = "\u{10FFFF}";
 
     private func _processTableJobs(alfangoDB : Database.AlfangoDB, table : Database.Table) {
         let jobQueueSize = Vector.size(table.pendingJobs);
@@ -79,94 +82,55 @@ module {
             "' on table '" # table.name # "'..."
         );
 
-        let keyIterator = Map.keys(table.items);
-        var readyToProcess = false;
+        let startKey = switch (jobState.lastProcessedId) {
+            case (null) { "" }; // If no cursor, start from the beginning.
+            case (?id) { id }; // Otherwise, resume from the last processed ID.
+        };
 
-        switch (jobState.lastProcessedId) {
-            case (null) {
-                readyToProcess := true;
+        let scanResult = BTree.scanLimit<Text, Database.Item>(
+            table.items,
+            Text.compare,
+            startKey,
+            UNBOUNDED_UPPER_KEY,
+            #fwd,
+            BATCH_SIZE,
+        );
+
+        var itemsProcessedInBatch : Nat = 0;
+        var bytesFreedInBatch : Nat64 = 0;
+
+        for ((itemId, item) in scanResult.results.vals()) {
+            // Reprocessing the first item in subsequent batches is okay because the operation is idempotent.
+            switch (Map.get(item.attributeDataValueMap, thash, jobState.attributeNames)) {
+                case (?valueToDelete) {
+                    let keySize = Nat64.fromNat(Text.size(jobState.attributeNames));
+                    let valueSize = Utils.calculateAttributeDataValueSize(valueToDelete);
+                    bytesFreedInBatch += (keySize + valueSize);
+                    Map.delete(item.attributeDataValueMap, thash, jobState.attributeNames);
+                };
+                case (null) {
+                    // Attribute not present, nothing to do.
+                };
             };
-            case (?cursorId) {
-                var foundCursor = false;
-                var continueLoop = true;
+            itemsProcessedInBatch += 1;
+            jobState.lastProcessedId := ?itemId; // Update cursor to the last processed item
+        };
 
-                while (continueLoop and not foundCursor) {
-                    switch (keyIterator.next()) {
-                        case (null) {
-                            continueLoop := false;
-                        };
-                        case (?key) {
-                            if (key == cursorId) {
-                                foundCursor := true;
-                            };
-                        };
-                    };
-                };
-
-                if (foundCursor) {
-                    readyToProcess := true;
-                } else {
-                    Debug.print("Warning: Job cursor '" # cursorId # "' not found. Restarting scan.");
-                    jobState.lastProcessedId := null;
-                    return;
-                };
+        if (bytesFreedInBatch > 0) {
+            Debug.print("Reclaiming " # Nat64.toText(bytesFreedInBatch) # " bytes from dropped attributes.");
+            if (alfangoDB.totalStableBytes >= bytesFreedInBatch) {
+                alfangoDB.totalStableBytes -= bytesFreedInBatch;
+            } else {
+                alfangoDB.totalStableBytes := 0; // Safeguard against underflow
             };
         };
 
-        if (readyToProcess) {
-            var itemsProcessedInBatch : Nat = 0;
-            var continueProcessing = true;
-            var isJobNowComplete = false;
-            var bytesFreedInBatch : Nat64 = 0;
+        Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items.");
 
-            while (continueProcessing and itemsProcessedInBatch < BATCH_SIZE) {
-                switch (keyIterator.next()) {
-                    case (null) {
-                        continueProcessing := false;
-                        isJobNowComplete := true;
-                    };
-                    case (?itemId) {
-                        switch (Map.get(table.items, thash, itemId)) {
-                            case (null) { /* Item was deleted, simply skip. */ };
-                            case (?item) {
-                                switch (Map.get(item.attributeDataValueMap, thash, jobState.attributeNames)) {
-                                    case (?valueToDelete) {
-                                        // 1. Calculate the size of the attribute name (Text) and the value
-                                        let keySize = Nat64.fromNat(Text.size(jobState.attributeNames));
-                                        let valueSize = Utils.calculateAttributeDataValueSize(valueToDelete);
-                                        bytesFreedInBatch += (keySize + valueSize);
-
-                                        // 2. Now delete the attribute from the item
-                                        Map.delete(item.attributeDataValueMap, thash, jobState.attributeNames);
-                                    };
-                                    case (null) {
-                                        // Attribute not present, nothing to delete or account for.
-                                    };
-                                };
-                            };
-                        };
-
-                        jobState.lastProcessedId := ?itemId;
-                        itemsProcessedInBatch += 1;
-                    };
-                };
-            };
-
-            if (bytesFreedInBatch > 0) {
-                Debug.print("Reclaiming " # Nat64.toText(bytesFreedInBatch) # " bytes from dropped attributes.");
-                if (alfangoDB.totalStableBytes >= bytesFreedInBatch) {
-                    alfangoDB.totalStableBytes -= bytesFreedInBatch;
-                } else {
-                    alfangoDB.totalStableBytes := 0; // Safeguard against underflow
-                };
-            };
-
-            Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items.");
-
-            if (isJobNowComplete) {
-                jobState.isComplete := true;
-                Debug.print("DropAttribute job for '" # jobState.attributeNames # "' is now complete.");
-            };
+        // If the number of processed items is less than the batch size, we've reached the end of the table.
+        if (itemsProcessedInBatch < BATCH_SIZE) {
+            jobState.isComplete := true;
+            Debug.print("DropAttribute job for '" # jobState.attributeNames # "' is now complete.");
         };
     };
 
@@ -188,75 +152,52 @@ module {
             case (?idx) { idx };
         };
 
-        let keyIterator = Map.keys(table.items);
-        var readyToProcess = false;
-
-        switch (jobState.lastProcessedId) {
-            case (null) {
-                readyToProcess := true;
-            };
-            case (?cursorId) {
-                var foundCursor = false;
-                var continueLoop = true;
-                while (continueLoop and not foundCursor) {
-                    switch (keyIterator.next()) {
-                        case (null) { continueLoop := false };
-                        case (?key) {
-                            if (key == cursorId) { foundCursor := true };
-                        };
-                    };
-                };
-                if (foundCursor) {
-                    readyToProcess := true;
-                } else {
-                    Debug.print("Warning: BuildIndex job cursor '" # cursorId # "' not found. Restarting scan.");
-                    jobState.lastProcessedId := null;
-                    return;
-                };
-            };
+        let startKey = switch (jobState.lastProcessedId) {
+            case (null) { "" }; // If no cursor, start from the beginning.
+            case (?id) { id }; // Otherwise, resume from the last processed ID.
         };
 
-        if (readyToProcess) {
-            var itemsProcessedInBatch : Nat = 0;
-            var continueProcessing = true;
-            var isJobNowComplete = false;
+        let scanResult = BTree.scanLimit<Text, Database.Item>(
+            table.items,
+            Text.compare,
+            startKey,
+            UNBOUNDED_UPPER_KEY,
+            #fwd,
+            BATCH_SIZE,
+        );
 
-            while (continueProcessing and itemsProcessedInBatch < BATCH_SIZE) {
-                switch (keyIterator.next()) {
-                    case (null) {
-                        continueProcessing := false;
-                        isJobNowComplete := true;
+        var itemsProcessedInBatch : Nat = 0;
+
+        for ((itemId, item) in scanResult.results.vals()) {
+            switch (Utils.generateCompoundKey(
+                item.attributeDataValueMap,
+                HashMap.HashMap<Database.AttributeName, Datatypes.AttributeDataValue>(
+                    0,
+                    Text.equal,
+                    Text.hash
+                ),
+                indexTable.attributeNames
+            )) {
+                case (null) {};
+                case (?compoundKey) {
+                    let indexBTree = indexTable.items;
+                    let idSet = switch (BTree.get(indexBTree, Text.compare, compoundKey)) {
+                        case (null) { Set.new<Text>() };
+                        case (?existingSet) { existingSet };
                     };
-                    case (?itemId) {
-                        switch (Map.get(table.items, thash, itemId)) {
-                            case (null) { /* Skip deleted item */ };
-                            case (?item) {
-                                switch (Utils.generateCompoundKey(item.attributeDataValueMap, indexTable.attributeNames)) {
-                                    case (null) {};
-                                    case (?compoundKey) {
-                                        let indexBTree = indexTable.items;
-                                        let idSet = switch (BTree.get(indexBTree, Text.compare, compoundKey)) {
-                                            case (null) { Set.new<Text>() };
-                                            case (?existingSet) { existingSet };
-                                        };
-                                        Set.add(idSet, thash, itemId);
-                                        ignore BTree.insert(indexBTree, Text.compare, compoundKey, idSet);
-                                    };
-                                };
-                            };
-                        };
-                        jobState.lastProcessedId := ?itemId;
-                        itemsProcessedInBatch += 1;
-                    };
+                    Set.add(idSet, thash, itemId);
+                    ignore BTree.insert(indexBTree, Text.compare, compoundKey, idSet);
                 };
             };
+            itemsProcessedInBatch += 1;
+            jobState.lastProcessedId := ?itemId;
+        };
 
-            Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items for index build.");
+        Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items for index build.");
 
-            if (isJobNowComplete) {
-                jobState.isComplete := true;
-                Debug.print("BuildIndex job for '" # indexName # "' is now complete.");
-            };
+        if (itemsProcessedInBatch < BATCH_SIZE) {
+            jobState.isComplete := true;
+            Debug.print("BuildIndex job for '" # indexName # "' is now complete.");
         };
     };
 

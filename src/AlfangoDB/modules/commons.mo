@@ -2,8 +2,8 @@ import Datatypes "../types/datatype";
 import Database "../types/database";
 import Utils "../utils";
 import Text "mo:base/Text";
-import Buffer "mo:base/Buffer";
 import Debug "mo:base/Debug";
+import HashMap "mo:base/HashMap";
 import Map "mo:map/Map";
 import Set "mo:map/Set";
 import { thash } "mo:map/Map";
@@ -74,47 +74,6 @@ module {
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    public func validateAttributeDataTypes({
-        attributeKeyDataValues : [(Text, AttributeDataValue)];
-        attributeNameToMetadataMap : Map.Map<Text, Database.AttributeMetadata>;
-    }) : {
-        isValidAttributesDataType : Bool;
-    } {
-
-        let unwantedAttributes = Buffer.Buffer<Text>(0);
-        let invalidAttributes = Buffer.Buffer<Text>(0);
-
-        for ((attributeName, attributeDataValue) in attributeKeyDataValues.vals()) {
-            let attributeExistInTable = Map.has(attributeNameToMetadataMap, thash, attributeName);
-
-            if (attributeExistInTable) {
-                var expectedAttributeDataType : Datatypes.AttributeDataType = #default;
-                ignore do ? {
-                    expectedAttributeDataType := Map.get(attributeNameToMetadataMap, thash, attributeName)!.dataType;
-                };
-                let {
-                    isValidAttributeDataType;
-                    actualAttributeDataType;
-                } = validateAttributeDataType({
-                    attributeDataValue;
-                    expectedAttributeDataType;
-                });
-
-                if (not isValidAttributeDataType) {
-                    invalidAttributes.add(attributeName);
-                    Debug.print("attribute: " # debug_show (attributeName) # " has invalid data type: " # debug_show (actualAttributeDataType));
-                };
-            } else {
-                unwantedAttributes.add(attributeName);
-                Debug.print("attribute: " # debug_show (attributeName) # " is not in table");
-            };
-        };
-
-        return {
-            isValidAttributesDataType = invalidAttributes.size() == 0 and unwantedAttributes.size() == 0;
-        };
-    };
-
     private func checkUniqueIndexViolation(
         indexTable : Database.IndexTable,
         compoundKey : Text,
@@ -150,7 +109,8 @@ module {
     };
 
     public func validateUniqueConstraints({
-        itemDataMap : Map.Map<AttributeName, AttributeDataValue>;
+        originalItemData : Map.Map<AttributeName, AttributeDataValue>;
+        patchData : HashMap.HashMap<AttributeName, AttributeDataValue>;
         table : Database.Table;
         itemIdToIgnore : ?Text;
     }) : {
@@ -168,7 +128,7 @@ module {
                         };
                     };
                     case (?indexTable) {
-                        switch (Utils.generateCompoundKey(itemDataMap, indexTable.attributeNames)) {
+                        switch (Utils.generateCompoundKey(originalItemData, patchData, indexTable.attributeNames)) {
                             case (null) {};
                             case (?compoundKey) {
                                 let isIndexValid = checkUniqueIndexViolation(

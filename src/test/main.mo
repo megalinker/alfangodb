@@ -41,6 +41,15 @@ actor TestMain {
         };
     };
 
+    private func ensureFreshDatabase(dbName : Text) : async () {
+        if (Map.has(db_state.databases, thash, dbName)) {
+            ignore await AlfangoDB.updateOperation({
+                updateOpsInput = #DeleteDatabaseInput({ name = dbName });
+                alfangoDB = db_state;
+            });
+        };
+    };
+
     public func test_database_ops() : async () {
         Debug.print("\n--- Testing Database Operations ---");
         let dbName = "db1";
@@ -86,6 +95,8 @@ actor TestMain {
         Debug.print("\n--- Testing Table Operations ---");
         let dbName = "db_for_tables";
         let tableName = "Users";
+
+        await ensureFreshDatabase(dbName);
 
         // Setup: Create a database
         ignore await AlfangoDB.updateOperation({
@@ -150,6 +161,8 @@ actor TestMain {
         Debug.print("\n--- Testing Item & Constraint Operations ---");
         let dbName = "db_for_items";
         let tableName = "Users";
+
+        await ensureFreshDatabase(dbName);
 
         // Setup: Create DB and Table
         ignore await AlfangoDB.updateOperation({
@@ -230,6 +243,8 @@ actor TestMain {
         Debug.print("\n--- Testing Scan Operations ---");
         let dbName = "db_for_scan";
         let tableName = "Products";
+
+        await ensureFreshDatabase(dbName);
 
         // Setup
         ignore await AlfangoDB.updateOperation({
@@ -320,6 +335,8 @@ actor TestMain {
         let dbName = "db_for_update";
         let tableName = "Tickets";
         let indexName = "status_idx";
+
+        await ensureFreshDatabase(dbName);
 
         // 1. Setup DB and Table with an index on 'status'
         ignore await AlfangoDB.updateOperation({
@@ -437,6 +454,8 @@ actor TestMain {
         let tableName = "Reviews";
         let indexName = "product_rating_idx";
 
+        await ensureFreshDatabase(dbName);
+
         // 1. Setup DB and Table with a compound index on '(product_id, rating)'
         ignore await AlfangoDB.updateOperation({
             updateOpsInput = #CreateDatabaseInput({ name = dbName });
@@ -518,6 +537,8 @@ actor TestMain {
         Debug.print("\n--- Testing Failure Conditions & Edge Cases ---");
         let dbName = "db_for_failures";
         let tableName = "Widgets";
+
+        await ensureFreshDatabase(dbName);
 
         // --- Setup a clean database and table for our tests ---
         ignore await AlfangoDB.updateOperation({
@@ -750,6 +771,8 @@ actor TestMain {
         let tableName = "Customers";
         let itemCount = 50; // Scalable: Set to 100_000 for a full stress test.
 
+        await ensureFreshDatabase(dbName);
+
         // 1. Setup: Create a database and a table with three indexes.
         ignore await AlfangoDB.updateOperation({
             updateOpsInput = #CreateDatabaseInput({ name = dbName });
@@ -862,6 +885,8 @@ actor TestMain {
         let dbName = "db_for_bulk_update";
         let tableName = "Tasks";
         let itemCount = 100; // Scalable: Set to 10_000 for a full stress test.
+
+        await ensureFreshDatabase(dbName);
 
         // 1. Setup: Create a table and populate it with items having an initial indexed state.
         ignore await AlfangoDB.updateOperation({
@@ -1047,6 +1072,8 @@ actor TestMain {
         let itemCount = 256; // 256 items * 100KB = ~25MB
         let blobSize = 100 * 1024; // 100KB
 
+        await ensureFreshDatabase(dbName);
+
         // 1. Setup: Create a table and fill it with ~25MB of data.
         ignore await AlfangoDB.updateOperation({
             updateOpsInput = #CreateDatabaseInput({ name = dbName });
@@ -1157,6 +1184,8 @@ actor TestMain {
         let tableName = "LogEntries";
         let itemCount = 50;
         let pageSize = 10;
+
+        await ensureFreshDatabase(dbName);
 
         // 1. Setup: Create a table and populate it with a known set of items.
         ignore await AlfangoDB.updateOperation({

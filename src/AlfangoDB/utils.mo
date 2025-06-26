@@ -56,17 +56,8 @@ module {
 
     let hexChars : [Char] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'];
 
-    private func byteToHex(b : Nat8) : Text {
-        let high = Nat.div(Nat8.toNat(b), 16);
-        let low = Nat.rem(Nat8.toNat(b), 16);
-        let highChar = Text.fromChar(hexChars[high]);
-        let lowChar = Text.fromChar(hexChars[low]);
-        return highChar # lowChar;
-    };
-
     public func serializeValue(val : AttributeDataValue) : Text {
         switch (val) {
-            // Primitive types are fine as they are, no loops.
             case (#default) { return "default" };
             case (#int(v)) { return "i:" # Int.toText(v) };
             case (#int8(v)) { return "i8:" # Int8.toText(v) };
@@ -85,22 +76,20 @@ module {
             case (#char(v)) { return "c:" # Char.toText(v) };
             case (#bool(v)) { return "b:" # Bool.toText(v) };
             case (#principal(v)) { return "p:" # Principal.toText(v) };
-
-            // Blob serialization can also be optimized slightly
             case (#blob(v)) {
-                let buffer = Buffer.Buffer<Text>(Array.size(Blob.toArray(v)) * 2 + 2);
-                buffer.add("B:");
+                let charBuffer = Buffer.Buffer<Char>(Array.size(Blob.toArray(v)) * 2 + 2);
+                charBuffer.add('B');
+                charBuffer.add(':');
                 for (byte in Blob.toArray(v).vals()) {
-                    buffer.add(byteToHex(byte));
+                    let n = Nat8.toNat(byte);
+                    charBuffer.add(hexChars[Nat.div(n, 16)]); // High nibble
+                    charBuffer.add(hexChars[Nat.rem(n, 16)]); // Low nibble
                 };
-                return Text.join("", buffer.vals());
+                return Text.fromIter(charBuffer.vals());
             };
-
-            // --- OPTIMIZED LIST SERIALIZATION ---
             case (#list(vs)) {
                 if (vs.size() == 0) { return "L:[]" };
 
-                // Use a Buffer to avoid repeated concatenation
                 let buffer = Buffer.Buffer<Text>(vs.size() * 2 + 1);
                 buffer.add("L:[");
                 let arr = Iter.toArray(vs.vals());
@@ -112,11 +101,8 @@ module {
                 };
                 buffer.add("]");
 
-                // Join all the parts into a single Text object at the end
                 return Text.join("", buffer.vals());
             };
-
-            // --- OPTIMIZED MAP SERIALIZATION ---
             case (#map(kvs)) {
                 if (kvs.size() == 0) { return "M:{}" };
 
@@ -124,7 +110,6 @@ module {
                 let sortedKeys = Array.sort<Text>(keys, Text.compare);
                 let kvMap = HashMap.fromIter<Text, AttributeDataValue>(kvs.vals(), 0, Text.equal, Text.hash);
 
-                // Use a Buffer to avoid repeated concatenation
                 let buffer = Buffer.Buffer<Text>(kvs.size() * 4 + 1);
                 buffer.add("M:{");
                 for (i in Iter.range(0, sortedKeys.size() - 1)) {
@@ -133,8 +118,8 @@ module {
                         case (null) { Prelude.unreachable() };
                         case (?val) { val };
                     };
-
-                    buffer.add("t:" # key);
+                    buffer.add("t:");
+                    buffer.add(key);
                     buffer.add(":");
                     buffer.add(serializeValue(value));
 
@@ -144,7 +129,6 @@ module {
                 };
                 buffer.add("}");
 
-                // Join all the parts into a single Text object at the end
                 return Text.join("", buffer.vals());
             };
         };
@@ -185,7 +169,156 @@ module {
     };
 
     public func areEqual(v1 : AttributeDataValue, v2 : AttributeDataValue) : Bool {
-        return serializeValue(v1) == serializeValue(v2);
+        switch (v1) {
+            case (#default) {
+                switch (v2) {
+                    case (#default) { return true };
+                    case (_) { return false };
+                };
+            };
+            case (#int(val1)) {
+                switch (v2) {
+                    case (#int(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#int8(val1)) {
+                switch (v2) {
+                    case (#int8(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#int16(val1)) {
+                switch (v2) {
+                    case (#int16(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#int32(val1)) {
+                switch (v2) {
+                    case (#int32(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#int64(val1)) {
+                switch (v2) {
+                    case (#int64(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#nat(val1)) {
+                switch (v2) {
+                    case (#nat(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#nat8(val1)) {
+                switch (v2) {
+                    case (#nat8(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#nat16(val1)) {
+                switch (v2) {
+                    case (#nat16(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#nat32(val1)) {
+                switch (v2) {
+                    case (#nat32(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#nat64(val1)) {
+                switch (v2) {
+                    case (#nat64(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#float(val1)) {
+                switch (v2) {
+                    case (#float(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#text(val1)) {
+                switch (v2) {
+                    case (#text(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#char(val1)) {
+                switch (v2) {
+                    case (#char(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#bool(val1)) {
+                switch (v2) {
+                    case (#bool(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#principal(val1)) {
+                switch (v2) {
+                    case (#principal(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#blob(val1)) {
+                switch (v2) {
+                    case (#blob(val2)) { return val1 == val2 };
+                    case (_) { return false };
+                };
+            };
+            case (#list(list1)) {
+                switch (v2) {
+                    case (#list(list2)) {
+                        if (Array.size(list1) != Array.size(list2)) {
+                            return false;
+                        };
+                        // Iterate and recursively compare each element
+                        for (i in Iter.range(0, Array.size(list1) - 1)) {
+                            if (not areEqual(list1[i], list2[i])) {
+                                return false;
+                            };
+                        };
+                        return true;
+                    };
+                    case (_) { return false };
+                };
+            };
+            case (#map(map1)) {
+                switch (v2) {
+                    case (#map(map2)) {
+                        if (Array.size(map1) != Array.size(map2)) {
+                            return false;
+                        };
+
+                        // For unordered map comparison, use a HashMap for efficient lookups.
+                        let map2HashMap = HashMap.fromIter<Text, AttributeDataValue>(map2.vals(), Array.size(map2), Text.equal, Text.hash);
+
+                        for ((key1, val1) in map1.vals()) {
+                            switch (map2HashMap.get(key1)) {
+                                case (null) {
+                                    // Key from map1 doesn't exist in map2
+                                    return false;
+                                };
+                                case (?val2) {
+                                    // Key exists, now recursively compare the values
+                                    if (not areEqual(val1, val2)) {
+                                        return false;
+                                    };
+                                };
+                            };
+                        };
+                        return true;
+                    };
+                    case (_) { return false };
+                };
+            };
+        };
     };
 
     private func normalizeFloatText(t : Text) : Text {
@@ -339,13 +472,24 @@ module {
     };
 
     public func generateCompoundKey(
-        itemData : Map.Map<Database.AttributeName, AttributeDataValue>,
+        originalData : Map.Map<Database.AttributeName, AttributeDataValue>,
+        patchData : HashMap.HashMap<Database.AttributeName, AttributeDataValue>,
         attributeNames : [Database.AttributeName],
     ) : ?Text {
         let keyParts = Buffer.Buffer<Text>(attributeNames.size());
 
         for (attrName in attributeNames.vals()) {
-            switch (Map.get(itemData, thash, attrName)) {
+            // Check the patch first for an updated value.
+            let value = switch (patchData.get(attrName)) {
+                case (?patchedValue) {
+                    ?patchedValue;
+                };
+                case (null) {
+                    Map.get(originalData, thash, attrName);
+                };
+            };
+
+            switch (value) {
                 case (null) {
                     return null;
                 };

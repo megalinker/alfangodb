@@ -1,4 +1,5 @@
 import Database "../types/database";
+import Datatype "../types/datatype";
 import InputTypes "../types/input";
 import OutputTypes "../types/output";
 import Utils "../utils";
@@ -7,6 +8,7 @@ import Set "mo:map/Set";
 import { thash } "mo:map/Map";
 import Debug "mo:base/Debug";
 import Text "mo:base/Text";
+import HashMap "mo:base/HashMap";
 import BTree "mo:stableheapbtreemap/BTree";
 
 module {
@@ -94,7 +96,7 @@ module {
                         return #err([remark]);
                     };
                     case (?table) {
-                        switch (Map.get(table.items, thash, deleteItemInput.id)) {
+                        switch (BTree.get(table.items, Text.compare, deleteItemInput.id)) {
                             case (null) {
                                 let remark = "item does not exist: " # debug_show (deleteItemInput.id);
                                 Debug.print(remark);
@@ -102,7 +104,7 @@ module {
                             };
                             case (?item) {
 
-                                let deletedItemSize = Utils.calculateItemSize(item.attributeDataValueMap);
+                                let deletedItemSize = item.sizeInBytes;
 
                                 if (alfangoDB.totalStableBytes >= deletedItemSize) {
                                     alfangoDB.totalStableBytes -= deletedItemSize;
@@ -112,7 +114,15 @@ module {
                                 // Iterate through all defined indexes for the table.
                                 for ((indexName, indexTable) in Map.entries(table.indexes)) {
                                     // For each index, generate its specific compound key from the item being deleted.
-                                    switch (Utils.generateCompoundKey(item.attributeDataValueMap, indexTable.attributeNames)) {
+                                    switch (Utils.generateCompoundKey(
+                                        item.attributeDataValueMap,
+                                        HashMap.HashMap<Database.AttributeName, Datatype.AttributeDataValue>(
+                                            0,
+                                            Text.equal,
+                                            Text.hash
+                                        ),
+                                        indexTable.attributeNames
+                                    )) {
                                         case (null) {};
                                         case (?compoundKey) {
                                             // The item should have an entry in this index. Find it and remove the item's ID.
@@ -137,7 +147,8 @@ module {
                                 };
 
                                 // Finally, remove the item itself from the main table data.
-                                Map.delete(table.items, thash, deleteItemInput.id);
+                                ignore BTree.delete(table.items, Text.compare, deleteItemInput.id);
+                                table.itemCount -= 1;
                                 Debug.print("item deleted with id: " # debug_show (deleteItemInput.id));
                                 return #ok({});
                             };

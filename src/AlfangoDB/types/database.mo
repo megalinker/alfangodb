@@ -44,6 +44,7 @@ module {
         var attributeDataValueMap : Map.Map<AttributeName, AttributeDataValue>;
         createdAt : Time.Time;
         var updatedAt : Time.Time;
+        var sizeInBytes : Nat64;
     };
 
     public type IndexTable = {
@@ -54,9 +55,10 @@ module {
     public type Table = {
         name : Text;
         metadata : TableMetadata;
-        items : Map.Map<Id, Item>;
+        items : BTree.BTree<Id, Item>;
         indexes : Map.Map<IndexName, IndexTable>;
         var pendingJobs : Vector.Vector<PendingJob>;
+        var itemCount : Nat;
     };
 
     public type Database = {
