@@ -130,10 +130,32 @@ actor class AlfangoDBActor() {
     * It delegates the call to the central service dispatcher.
     */
     public shared func updateOperation(updateOpsInput : InputTypes.UpdateOpsInputType) : async OutputTypes.UpdateOpsOutputType {
-        return await Service.updateOperation({
-            updateOpsInput;
-            alfangoDB = db_instance;
-        });
+
+        // 1. ACQUIRE GLOBAL LOCK
+        if (isProcessingJobs) {
+            Debug.trap("Concurrency Conflict: The database is currently busy with a background job or another write operation. Please try again shortly.");
+        };
+        isProcessingJobs := true;
+
+        // 2. EXECUTE THE OPERATION
+        // Initialize `result` with a default error value to satisfy Motoko's variable declaration rules.
+        // This value will be overwritten in the `try` block on success.
+        var result : OutputTypes.UpdateOpsOutputType = #CreateDatabaseOutput(#err(["Operation did not complete."]));
+
+        try {
+            result := await Service.updateOperation({
+                updateOpsInput;
+                alfangoDB = db_instance;
+            });
+        } catch (e) {
+            Debug.print("CRITICAL: updateOperation trapped with error: " # Error.message(e));
+            result := #CreateDatabaseOutput(#err(["An unexpected internal error occurred during the update operation."]));
+        };
+
+        // 3. RELEASE GLOBAL LOCK
+        isProcessingJobs := false;
+
+        return result;
     };
 
     /**

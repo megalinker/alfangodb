@@ -12,6 +12,7 @@ import Array "mo:base/Array";
 import Nat64 "mo:base/Nat64";
 import Int "mo:base/Int";
 import HashMap "mo:base/HashMap";
+import Iter "mo:base/Iter";
 import Map "mo:map/Map";
 import Set "mo:map/Set";
 import { thash } "mo:map/Map";
@@ -39,6 +40,7 @@ module {
                             return #err(["attribute " # debug_show (newAttribute.name) # " already exists"]);
                         };
 
+                        table.metadata.schemaVersion += 1;
                         Map.set(table.metadata.attributesMap, thash, newAttribute.name, newAttribute);
 
                         Debug.print("Attribute '" # newAttribute.name # "' added to metadata for table '" # table.name # "'.");
@@ -91,6 +93,8 @@ module {
                             };
                         };
 
+                        table.metadata.schemaVersion += 1;
+
                         for (indexMeta in indexesToDrop.vals()) {
                             Debug.print(
                                 "Dropping index '" # indexMeta.name #
@@ -108,6 +112,7 @@ module {
                             attributeNames = attributeName;
                             var lastProcessedId = null;
                             var isComplete = false;
+                            var schemaVersionAtCreation = table.metadata.schemaVersion;
                         });
                         Vector.add(table.pendingJobs, newJob);
 
@@ -145,19 +150,18 @@ module {
                             case (null) { return #err(["item not found"]) };
                             case (?item) {
 
-                                // 1a. Calculate the memory delta efficiently by only looking at the patch.
+                                // 1a. Calculate the memory delta efficiently.
                                 var sizeDelta : Int = 0;
                                 for ((attrName, newAttrValue) in updateItemInput.attributeDataValues.vals()) {
-                                    let oldAttrValue = Map.get(item.attributeDataValueMap, thash, attrName);
                                     let newSize = Utils.calculateAttributeDataValueSize(newAttrValue);
 
-                                    switch (oldAttrValue) {
+                                    switch (Map.get(item.attributeDataValueMap, thash, attrName)) {
                                         case (null) {
                                             sizeDelta += Text.size(attrName);
                                             sizeDelta += Nat64.toNat(newSize);
                                         };
-                                        case (?oldVal) {
-                                            let oldSize = Utils.calculateAttributeDataValueSize(oldVal);
+                                        case (?oldStoredAttr) {
+                                            let oldSize = oldStoredAttr.sizeInBytes;
                                             sizeDelta += (Nat64.toNat(newSize) - Nat64.toNat(oldSize));
                                         };
                                     };
@@ -189,7 +193,7 @@ module {
                                     };
                                 };
 
-                                // 1d. Validate data types for the attributes in the patch
+                                // Create a HashMap of the patch data for validation.
                                 let patchData = HashMap.fromIter<Text, Datatype.AttributeDataValue>(
                                     updateItemInput.attributeDataValues.vals(),
                                     updateItemInput.attributeDataValues.size(),
@@ -197,9 +201,21 @@ module {
                                     Text.hash,
                                 );
 
-                                // 1e. Validate unique constraints against the potential new state
+                                // 1d. Create a map of the original raw values for constraint validation.
+                                let originalItemData = Map.fromIter<Database.AttributeName, Datatype.AttributeDataValue>(
+                                    Iter.map<(Database.AttributeName, Database.StoredAttribute), (Database.AttributeName, Datatype.AttributeDataValue)>(
+                                        Map.entries(item.attributeDataValueMap),
+                                        func(entry : (Database.AttributeName, Database.StoredAttribute)) : (Database.AttributeName, Datatype.AttributeDataValue) {
+                                            let (attrName, storedAttr) = entry;
+                                            (attrName, storedAttr.value);
+                                        },
+                                    ),
+                                    thash,
+                                );
+
+                                // 1e. Validate unique constraints against the potential new state.
                                 let { areConstraintsMet; violatedAttributes } = Commons.validateUniqueConstraints({
-                                    originalItemData = item.attributeDataValueMap;
+                                    originalItemData = originalItemData;
                                     patchData = patchData;
                                     table = table;
                                     itemIdToIgnore = ?updateItemInput.id;
@@ -209,28 +225,42 @@ module {
                                 };
 
                                 // --- PHASE 2: COMMIT STATE CHANGES (Atomic-like) ---
-                                // All validations have passed. Now we perform all state changes.
 
-                                // 2a. Update memory usage using the pre-calculated delta
+                                // 2a. Update memory usage using the pre-calculated delta.
                                 if (sizeDelta > 0) {
                                     alfangoDB.totalStableBytes += Nat64.fromNat(Int.abs(sizeDelta));
                                 } else if (sizeDelta < 0) {
                                     let sizeDecrease = Nat64.fromNat(Int.abs(-sizeDelta));
-                                    if (alfangoDB.totalStableBytes >= sizeDecrease) {
-                                        alfangoDB.totalStableBytes -= sizeDecrease;
-                                    } else {
-                                        alfangoDB.totalStableBytes := 0;
+                                    if (alfangoDB.totalStableBytes < sizeDecrease) {
+                                        Debug.trap(
+                                            "CRITICAL: Memory accounting inconsistency detected during update. " #
+                                            "totalStableBytes (" # Nat64.toText(alfangoDB.totalStableBytes) #
+                                            ") < sizeDecrease (" # Nat64.toText(sizeDecrease) # ")."
+                                        );
                                     };
+                                    alfangoDB.totalStableBytes -= sizeDecrease;
                                 };
 
-                                // 2b. Update indexes
+                                // 2b. Update indexes.
+                                // We need to generate the "before" and "after" view of the item's values.
+                                let newValuesMap = Map.fromIter<Database.AttributeName, Datatype.AttributeDataValue>(
+                                    Iter.map<(Database.AttributeName, Database.StoredAttribute), (Database.AttributeName, Datatype.AttributeDataValue)>(
+                                        Map.entries(item.attributeDataValueMap),
+                                        func(entry : (Database.AttributeName, Database.StoredAttribute)) : (Database.AttributeName, Datatype.AttributeDataValue) {
+                                            let (attrName, storedAttr) = entry;
+                                            // if the patch has a newer value for this field, use it; otherwise keep the old
+                                            switch (patchData.get(attrName)) {
+                                                case null (attrName, storedAttr.value);
+                                                case (?newVal) (attrName, newVal);
+                                            };
+                                        },
+                                    ),
+                                    thash,
+                                );
+
                                 for ((indexName, indexTable) in Map.entries(table.indexes)) {
-                                    let oldCompoundKey = Utils.generateCompoundKey(
-                                        item.attributeDataValueMap,
-                                        HashMap.HashMap<Text, Datatype.AttributeDataValue>(0, Text.equal, Text.hash),
-                                        indexTable.attributeNames,
-                                    );
-                                    let newCompoundKey = Utils.generateCompoundKey(item.attributeDataValueMap, patchData, indexTable.attributeNames);
+                                    let oldCompoundKey = Utils.generateCompoundKey(originalItemData, indexTable.attributeNames);
+                                    let newCompoundKey = Utils.generateCompoundKey(newValuesMap, indexTable.attributeNames);
 
                                     if (oldCompoundKey != newCompoundKey) {
                                         // Delete the old index entry
@@ -248,7 +278,6 @@ module {
                                             };
                                             case (null) {};
                                         };
-
                                         // Add the new index entry
                                         switch (newCompoundKey) {
                                             case (?newKey) {
@@ -268,7 +297,7 @@ module {
                                     };
                                 };
 
-                                // 2c. Update the item data and its cached size
+                                // 2c. Update the item data and its cached size.
                                 if (sizeDelta > 0) {
                                     item.sizeInBytes += Nat64.fromNat(Int.abs(sizeDelta));
                                 } else if (sizeDelta < 0) {
@@ -281,14 +310,24 @@ module {
                                 };
                                 item.updatedAt := Time.now();
 
+                                // Apply the patch to the item's stable map.
                                 for ((attrName, attrValue) in patchData.entries()) {
-                                    Map.set(item.attributeDataValueMap, thash, attrName, attrValue);
+                                    Map.set(
+                                        item.attributeDataValueMap,
+                                        thash,
+                                        attrName,
+                                        {
+                                            value = attrValue;
+                                            // Calculate and cache the size for the new/updated value.
+                                            sizeInBytes = Utils.calculateAttributeDataValueSize(attrValue);
+                                        },
+                                    );
                                 };
 
                                 Debug.print("item updated with id: " # debug_show (updateItemInput.id));
                                 return #ok({
                                     id = item.id;
-                                    item = Map.toArray(item.attributeDataValueMap);
+                                    item = Map.toArray(newValuesMap);
                                 });
                             };
                         };
@@ -335,11 +374,13 @@ module {
                             return #err(Buffer.toArray(errorBuffer));
                         };
 
+                        table.metadata.schemaVersion += 1;
+
                         Vector.add(table.metadata.indexes, index);
 
                         let newIndexTable : Database.IndexTable = {
                             attributeNames = index.attributeNames;
-                            items = BTree.init<Text, Set.Set<Text>>(null);
+                            var items = BTree.init<Text, Set.Set<Text>>(null);
                         };
                         Map.set(table.indexes, thash, index.name, newIndexTable);
 
@@ -348,6 +389,7 @@ module {
                                 indexName = index.name;
                                 var lastProcessedId = null;
                                 var isComplete = false;
+                                var schemaVersionAtCreation = table.metadata.schemaVersion;
                             });
                             Vector.add(table.pendingJobs, newJob);
                             Debug.print("Index '" # index.name # "' created. Build job scheduled.");

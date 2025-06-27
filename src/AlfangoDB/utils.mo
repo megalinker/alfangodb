@@ -472,24 +472,13 @@ module {
     };
 
     public func generateCompoundKey(
-        originalData : Map.Map<Database.AttributeName, AttributeDataValue>,
-        patchData : HashMap.HashMap<Database.AttributeName, AttributeDataValue>,
+        data : Map.Map<Database.AttributeName, AttributeDataValue>,
         attributeNames : [Database.AttributeName],
     ) : ?Text {
         let keyParts = Buffer.Buffer<Text>(attributeNames.size());
 
         for (attrName in attributeNames.vals()) {
-            // Check the patch first for an updated value.
-            let value = switch (patchData.get(attrName)) {
-                case (?patchedValue) {
-                    ?patchedValue;
-                };
-                case (null) {
-                    Map.get(originalData, thash, attrName);
-                };
-            };
-
-            switch (value) {
+            switch (Map.get(data, thash, attrName)) {
                 case (null) {
                     return null;
                 };
@@ -544,16 +533,17 @@ module {
 
     // Function to calculate the total estimated size of a database Item.
     public func calculateItemSize(
-        itemDataMap : Map.Map<Database.AttributeName, AttributeDataValue>
+        itemStoredAttrMap : Map.Map<Database.AttributeName, Database.StoredAttribute>
     ) : Nat64 {
-        // Start with an estimate for the Item record overhead itself.
-        var totalSize : Nat64 = 64;
+        var totalSize : Nat64 = 64; // Overhead for id, timestamps, etc.
 
-        for ((attrName, attrValue) in Map.entries(itemDataMap)) {
+        for ((attrName, storedAttr) in Map.entries(itemStoredAttrMap)) {
             // Add size of the attribute name (key) in the map
             totalSize += Nat64.fromNat(Text.size(attrName));
-            // Add size of the attribute value
-            totalSize += calculateAttributeDataValueSize(attrValue);
+            // Add size from the CACHE.
+            totalSize += storedAttr.sizeInBytes;
+            // Add overhead for the StoredAttribute record itself
+            totalSize += 16; // Estimate for record pointers/tags
         };
 
         return totalSize;

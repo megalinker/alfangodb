@@ -7,7 +7,7 @@ import Debug "mo:base/Debug";
 import Nat "mo:base/Nat";
 import Buffer "mo:base/Buffer";
 import Nat64 "mo:base/Nat64";
-import HashMap "mo:base/HashMap";
+import Iter "mo:base/Iter";
 import Vector "mo:vector";
 import BTree "mo:stableheapbtreemap/BTree";
 import Utils "../utils";
@@ -77,6 +77,15 @@ module {
     private func _processDropAttributeJob(alfangoDB : Database.AlfangoDB, table : Database.Table, jobState : Database.DropAttributeJob) {
         if (jobState.isComplete) { return };
 
+        if (jobState.schemaVersionAtCreation < table.metadata.schemaVersion) {
+            Debug.print(
+                "Warning: Schema change detected for DropAttribute job on table '" # table.name #
+                "'. Resetting cursor to ensure data consistency. This may re-process some items."
+            );
+            jobState.lastProcessedId := null;
+            jobState.schemaVersionAtCreation := table.metadata.schemaVersion;
+        };
+
         Debug.print(
             "Processing DropAttribute job for '" # jobState.attributeNames #
             "' on table '" # table.name # "'..."
@@ -87,6 +96,7 @@ module {
             case (?id) { id }; // Otherwise, resume from the last processed ID.
         };
 
+        // Scan a batch of items from the table's B-Tree.
         let scanResult = BTree.scanLimit<Text, Database.Item>(
             table.items,
             Text.compare,
@@ -97,37 +107,55 @@ module {
         );
 
         var itemsProcessedInBatch : Nat = 0;
-        var bytesFreedInBatch : Nat64 = 0;
+        var totalBytesFreedInBatch : Nat64 = 0;
 
         for ((itemId, item) in scanResult.results.vals()) {
-            // Reprocessing the first item in subsequent batches is okay because the operation is idempotent.
             switch (Map.get(item.attributeDataValueMap, thash, jobState.attributeNames)) {
-                case (?valueToDelete) {
+                case (?storedAttrToDelete) {
+                    // This attribute exists in the item, so we need to remove it and update sizes.
+
+                    // 1. Calculate the size being freed for this specific attribute.
+                    // This includes the size of the key (Text) and the value (from its cache).
                     let keySize = Nat64.fromNat(Text.size(jobState.attributeNames));
-                    let valueSize = Utils.calculateAttributeDataValueSize(valueToDelete);
-                    bytesFreedInBatch += (keySize + valueSize);
+                    let valueSize = storedAttrToDelete.sizeInBytes;
+                    let recordOverhead : Nat64 = 16;
+                    let bytesFreedForItem = keySize + valueSize + recordOverhead;
+
+                    // 2. Add to the batch total.
+                    totalBytesFreedInBatch += bytesFreedForItem;
+
+                    // 3. Update the item's own cached total size.
+                    if (item.sizeInBytes >= bytesFreedForItem) {
+                        item.sizeInBytes -= bytesFreedForItem;
+                    } else {
+                        // This indicates a memory accounting bug.
+                        item.sizeInBytes := 0;
+                    };
+
+                    // 4. Finally, delete the attribute from the item's map.
                     Map.delete(item.attributeDataValueMap, thash, jobState.attributeNames);
                 };
                 case (null) {
-                    // Attribute not present, nothing to do.
+                    // Attribute not present in this item, nothing to do.
                 };
             };
             itemsProcessedInBatch += 1;
             jobState.lastProcessedId := ?itemId; // Update cursor to the last processed item
         };
 
-        if (bytesFreedInBatch > 0) {
-            Debug.print("Reclaiming " # Nat64.toText(bytesFreedInBatch) # " bytes from dropped attributes.");
-            if (alfangoDB.totalStableBytes >= bytesFreedInBatch) {
-                alfangoDB.totalStableBytes -= bytesFreedInBatch;
+        // After processing the batch, update the global memory counter.
+        if (totalBytesFreedInBatch > 0) {
+            Debug.print("Reclaiming " # Nat64.toText(totalBytesFreedInBatch) # " bytes from dropped attributes.");
+            if (alfangoDB.totalStableBytes >= totalBytesFreedInBatch) {
+                alfangoDB.totalStableBytes -= totalBytesFreedInBatch;
             } else {
-                alfangoDB.totalStableBytes := 0; // Safeguard against underflow
+                Debug.print("Warning: Global memory counter underflow during DropAttribute job. Resetting to zero.");
+                alfangoDB.totalStableBytes := 0;
             };
         };
 
-        Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items.");
+        Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items for DropAttribute job.");
 
-        // If the number of processed items is less than the batch size, we've reached the end of the table.
         if (itemsProcessedInBatch < BATCH_SIZE) {
             jobState.isComplete := true;
             Debug.print("DropAttribute job for '" # jobState.attributeNames # "' is now complete.");
@@ -136,6 +164,25 @@ module {
 
     private func _processBuildIndexJob(table : Database.Table, jobState : Database.BuildIndexJob) {
         if (jobState.isComplete) { return };
+
+        if (jobState.schemaVersionAtCreation < table.metadata.schemaVersion) {
+            Debug.print(
+                "Warning: Schema change detected for BuildIndex job on table '" # table.name #
+                "'. Resetting cursor to ensure data consistency. This may re-process some items."
+            );
+            // Resetting the cursor forces a full rescan.
+            jobState.lastProcessedId := null;
+            // The index BTree should be cleared to avoid duplicate entries from the rescan.
+            switch (Map.get(table.indexes, thash, jobState.indexName)) {
+                case (?indexTable) {
+                    indexTable.items := BTree.init(null);
+                    Debug.print("Cleared index BTree for '" # jobState.indexName # "' before rescan.");
+                };
+                case (null) {};
+            };
+            // Update the job's version stamp to the current version.
+            jobState.schemaVersionAtCreation := table.metadata.schemaVersion;
+        };
 
         let indexName = jobState.indexName;
         Debug.print(
@@ -157,6 +204,7 @@ module {
             case (?id) { id }; // Otherwise, resume from the last processed ID.
         };
 
+        // Scan a batch of items from the table's B-Tree.
         let scanResult = BTree.scanLimit<Text, Database.Item>(
             table.items,
             Text.compare,
@@ -169,17 +217,25 @@ module {
         var itemsProcessedInBatch : Nat = 0;
 
         for ((itemId, item) in scanResult.results.vals()) {
-            switch (Utils.generateCompoundKey(
-                item.attributeDataValueMap,
-                HashMap.HashMap<Database.AttributeName, Datatypes.AttributeDataValue>(
-                    0,
-                    Text.equal,
-                    Text.hash
+            // 1. Create a temporary map of raw values from the item's StoredAttributes.
+            let valuesMap = Map.fromIter<Database.AttributeName, Datatypes.AttributeDataValue>(
+                Iter.map<(Database.AttributeName, Database.StoredAttribute), (Database.AttributeName, Datatypes.AttributeDataValue)>(
+                    Map.entries<Database.AttributeName, Database.StoredAttribute>(item.attributeDataValueMap),
+                    func(entry) {
+                        let (attrName, storedAttr) = entry;
+                        return (attrName, storedAttr.value);
+                    },
                 ),
-                indexTable.attributeNames
-            )) {
-                case (null) {};
+                thash, // still pass your hash‐utils to fromIter
+            );
+
+            // 2. Call the simplified generateCompoundKey function.
+            switch (Utils.generateCompoundKey(valuesMap, indexTable.attributeNames)) {
+                case (null) {
+                    // This item doesn't have all attributes for the index, so it's not indexed.
+                };
                 case (?compoundKey) {
+                    // This item is indexable. Add its ID to the index B-Tree.
                     let indexBTree = indexTable.items;
                     let idSet = switch (BTree.get(indexBTree, Text.compare, compoundKey)) {
                         case (null) { Set.new<Text>() };
@@ -190,11 +246,12 @@ module {
                 };
             };
             itemsProcessedInBatch += 1;
-            jobState.lastProcessedId := ?itemId;
+            jobState.lastProcessedId := ?itemId; // Update cursor to the last processed item
         };
 
         Debug.print("Processed " # Nat.toText(itemsProcessedInBatch) # " items for index build.");
 
+        // If the number of processed items is less than the batch size, we've reached the end of the table.
         if (itemsProcessedInBatch < BATCH_SIZE) {
             jobState.isComplete := true;
             Debug.print("BuildIndex job for '" # indexName # "' is now complete.");

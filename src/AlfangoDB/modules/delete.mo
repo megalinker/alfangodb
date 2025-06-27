@@ -8,7 +8,8 @@ import Set "mo:map/Set";
 import { thash } "mo:map/Map";
 import Debug "mo:base/Debug";
 import Text "mo:base/Text";
-import HashMap "mo:base/HashMap";
+import Nat64 "mo:base/Nat64";
+import Iter "mo:base/Iter";
 import BTree "mo:stableheapbtreemap/BTree";
 
 module {
@@ -78,83 +79,93 @@ module {
 
         let databases = alfangoDB.databases;
 
-        if (not Map.has(databases, thash, deleteItemInput.databaseName)) {
+        // Using let-else for cleaner early returns
+        let ?database = Map.get(databases, thash, deleteItemInput.databaseName) else {
             let remark = "database does not exist: " # debug_show (deleteItemInput.databaseName);
             Debug.print(remark);
             return #err([remark]);
         };
 
-        switch (Map.get(databases, thash, deleteItemInput.databaseName)) {
+        let ?table = Map.get(database.tables, thash, deleteItemInput.tableName) else {
+            let remark = "table does not exist: " # debug_show (deleteItemInput.tableName);
+            Debug.print(remark);
+            return #err([remark]);
+        };
+
+        switch (BTree.get(table.items, Text.compare, deleteItemInput.id)) {
             case (null) {
-                return #err(["Database not found"]);
+                let remark = "item does not exist: " # debug_show (deleteItemInput.id);
+                Debug.print(remark);
+                return #err([remark]);
             };
-            case (?database) {
-                switch (Map.get(database.tables, thash, deleteItemInput.tableName)) {
-                    case (null) {
-                        let remark = "table does not exist: " # debug_show (deleteItemInput.tableName);
-                        Debug.print(remark);
-                        return #err([remark]);
-                    };
-                    case (?table) {
-                        switch (BTree.get(table.items, Text.compare, deleteItemInput.id)) {
-                            case (null) {
-                                let remark = "item does not exist: " # debug_show (deleteItemInput.id);
-                                Debug.print(remark);
-                                return #err([remark]);
-                            };
-                            case (?item) {
+            case (?item) {
 
-                                let deletedItemSize = item.sizeInBytes;
+                // --- PRE-COMMIT PHASE ---
 
-                                if (alfangoDB.totalStableBytes >= deletedItemSize) {
-                                    alfangoDB.totalStableBytes -= deletedItemSize;
-                                } else {
-                                    alfangoDB.totalStableBytes := 0;
+                let deletedItemSize = item.sizeInBytes;
+
+                // Sanity check: The total size must be greater than the item being deleted.
+                if (alfangoDB.totalStableBytes < deletedItemSize) {
+                    Debug.trap(
+                        "CRITICAL: Memory accounting inconsistency detected during delete. " #
+                        "totalStableBytes (" # Nat64.toText(alfangoDB.totalStableBytes) #
+                        ") < deletedItemSize (" # Nat64.toText(deletedItemSize) # ")."
+                    );
+                };
+
+                // Create a temporary map of the item's raw values for key generation.
+                let valuesMap = Map.fromIter<Database.AttributeName, Datatype.AttributeDataValue>(
+                    Iter.map<(Text, Database.StoredAttribute), (Database.AttributeName, Datatype.AttributeDataValue)>(
+                        Map.entries(item.attributeDataValueMap),
+                        func(entry : (Text, Database.StoredAttribute)) {
+                            let (attrName, storedAttr) = entry;
+                            return (attrName, storedAttr.value);
+                        }
+                    ),
+                    thash,
+                );
+
+                // --- COMMIT PHASE ---
+
+                // 1. Update total memory usage.
+                alfangoDB.totalStableBytes -= deletedItemSize;
+
+                // 2. Iterate through all defined indexes for the table to remove entries.
+                for ((indexName, indexTable) in Map.entries(table.indexes)) {
+                    // For each index, generate its specific compound key.
+                    switch (Utils.generateCompoundKey(valuesMap, indexTable.attributeNames)) {
+                        case (null) {
+                            // This item didn't have all the attributes for this index, so nothing to delete.
+                        };
+                        case (?compoundKey) {
+                            // The item should have an entry in this index. Find it and remove the item's ID.
+                            let indexBTree = indexTable.items;
+
+                            switch (BTree.get(indexBTree, Text.compare, compoundKey)) {
+                                case (null) {
+                                    // This is a sign of inconsistency, but we can proceed.
+                                    // The goal is deletion, and the index entry is already gone.
+                                    Debug.print("Warning: Item " # item.id # " not found in index '" # indexName # "' for key '" # compoundKey # "'. State might be inconsistent.");
                                 };
-                                // Iterate through all defined indexes for the table.
-                                for ((indexName, indexTable) in Map.entries(table.indexes)) {
-                                    // For each index, generate its specific compound key from the item being deleted.
-                                    switch (Utils.generateCompoundKey(
-                                        item.attributeDataValueMap,
-                                        HashMap.HashMap<Database.AttributeName, Datatype.AttributeDataValue>(
-                                            0,
-                                            Text.equal,
-                                            Text.hash
-                                        ),
-                                        indexTable.attributeNames
-                                    )) {
-                                        case (null) {};
-                                        case (?compoundKey) {
-                                            // The item should have an entry in this index. Find it and remove the item's ID.
-                                            let indexBTree = indexTable.items;
+                                case (?idSet) {
+                                    // Remove the item's ID from the set of IDs associated with this key.
+                                    Set.delete(idSet, thash, item.id);
 
-                                            switch (BTree.get(indexBTree, Text.compare, compoundKey)) {
-                                                case (null) {
-                                                    Debug.print("Warning: Item " # item.id # " not found in index '" # indexName # "' for key '" # compoundKey # "'.");
-                                                };
-                                                case (?idSet) {
-                                                    // Remove the item's ID from the set of IDs associated with this key.
-                                                    Set.delete(idSet, thash, item.id);
-
-                                                    // If the set is now empty, remove the entire key from the B-Tree to save space.
-                                                    if (Set.size(idSet) == 0) {
-                                                        ignore BTree.delete(indexBTree, Text.compare, compoundKey);
-                                                    };
-                                                };
-                                            };
-                                        };
+                                    // If the set is now empty, remove the entire key from the B-Tree to save space.
+                                    if (Set.size(idSet) == 0) {
+                                        ignore BTree.delete(indexBTree, Text.compare, compoundKey);
                                     };
                                 };
-
-                                // Finally, remove the item itself from the main table data.
-                                ignore BTree.delete(table.items, Text.compare, deleteItemInput.id);
-                                table.itemCount -= 1;
-                                Debug.print("item deleted with id: " # debug_show (deleteItemInput.id));
-                                return #ok({});
                             };
                         };
                     };
                 };
+
+                // 3. Finally, remove the item from the main table data.
+                ignore BTree.delete(table.items, Text.compare, deleteItemInput.id);
+                table.itemCount -= 1;
+                Debug.print("item deleted with id: " # debug_show (deleteItemInput.id));
+                return #ok({});
             };
         };
     };

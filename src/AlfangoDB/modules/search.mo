@@ -61,13 +61,40 @@ module {
         var continueScanning = true;
         var lastProcessedId : ?Text = cursor;
 
+        var fastPathCheck : ?{
+            attrName : Text;
+            expectedValue : RelationalExpressionAttributeDataValue;
+        } = null;
+
+        switch (filter) {
+            case (#AND(filters)) {
+                if (filters.size() > 0) {
+                    switch (filters[0]) {
+                        case (#expression({ attributeNames; filterExpressionCondition = #EQ(val) })) {
+                            fastPathCheck := ?{
+                                attrName = attributeNames;
+                                expectedValue = val;
+                            };
+                        };
+                        case _ {};
+                    };
+                };
+            };
+            case (#expression({ attributeNames; filterExpressionCondition = #EQ(val) })) {
+                fastPathCheck := ?{
+                    attrName = attributeNames;
+                    expectedValue = val;
+                };
+            };
+            case _ {};
+        };
+
         label scan_loop while (continueScanning and resultsBuffer.size() <= limit) {
             let startKey = switch (lastProcessedId) {
                 case null { "" };
                 case (?id) { id };
             };
 
-            // Scan a batch from the main items B-Tree.
             let scanResult = BTree.scanLimit<Text, Database.Item>(
                 table.items,
                 Text.compare,
@@ -84,18 +111,52 @@ module {
 
             var itemsToProcess = scanResult.results;
             if (lastProcessedId != null and itemsToProcess.size() > 0 and itemsToProcess[0].0 == startKey) {
-                // Skip the cursor item from the previous page.
                 itemsToProcess := Iter.toArray(Array.slice(itemsToProcess, 1, itemsToProcess.size()));
             };
 
-            if (itemsToProcess.size() == 0) {};
-
             for ((itemId, item) in itemsToProcess.vals()) {
                 lastProcessedId := ?itemId;
-                if (evaluateFilter(item, filter)) {
+
+                // --- OPTIMIZATION: Apply the fast path check if available ---
+                var passedFastPath = true;
+                switch (fastPathCheck) {
+                    case (?check) {
+                        // Assume it fails until proven otherwise.
+                        passedFastPath := false;
+                        switch (Map.get(item.attributeDataValueMap, thash, check.attrName)) {
+                            case (?storedAttr) {
+                                // Perform the cheap EQ check first.
+                                if (Utils.areEqual(storedAttr.value, check.expectedValue)) {
+                                    passedFastPath := true;
+                                };
+                            };
+                            case (null) {
+                                /* Attribute not found, automatically fails the EQ check */
+                            };
+                        };
+                    };
+                    case (null) {
+                        /* No fast path available, proceed to full evaluation */
+                    };
+                };
+                // --- End of Optimization ---
+
+                if (passedFastPath and evaluateFilter(item, filter)) {
+                    // The full evaluateFilter is still necessary for the rest of the conditions,
+                    // but we've already bailed out on many items.
                     resultsBuffer.add({
                         id = item.id;
-                        item = Map.toArray(item.attributeDataValueMap);
+                        item = Map.toArray(
+                            Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                                Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
+                                    Map.entries(item.attributeDataValueMap),
+                                    func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
+                                        (entry.0, entry.1.value)
+                                    },
+                                ),
+                                thash,
+                            )
+                        );
                     });
                     if (resultsBuffer.size() > limit) {
                         break scan_loop;
@@ -104,11 +165,11 @@ module {
             };
 
             if (scanResult.results.size() < FULL_SCAN_INTERNAL_BATCH_SIZE) {
-                // We've reached the end of the table.
                 continueScanning := false;
             };
         };
 
+        // ... rest of the function is unchanged ...
         let hasMore = resultsBuffer.size() > limit;
         var itemsToReturn = Buffer.toArray(resultsBuffer);
         var nextCursor : ?SearchTypes.PaginatedScanCursor = null;
@@ -153,7 +214,6 @@ module {
         var indexCursor : ?Text = ?scanBounds.lower;
         var pastItemCursor = (cursorItemId == null);
 
-        // label the outer while
         label scan_loop while (continueScanningIndex and resultsBuffer.size() <= limit) {
             let lowerBound = switch (indexCursor) {
                 case (?c) { c };
@@ -169,7 +229,6 @@ module {
                 INDEX_SCAN_INTERNAL_BATCH_SIZE,
             );
 
-            // nothing more in the index
             if (scanResult.results.size() == 0) {
                 continueScanningIndex := false;
                 continue scan_loop;
@@ -177,19 +236,13 @@ module {
 
             var lastProcessedKeyInBatch : Text = "";
 
-            // label the loop over index entries
             label key_loop for ((compoundKey, idSet) in scanResult.results.vals()) {
                 lastProcessedKeyInBatch := compoundKey;
 
-                // skip until we pass the cursor item
-                if (compoundKey == lowerBound and not pastItemCursor) {
-                    // (we’ll catch up on the first id_loop below)
-                };
+                if (compoundKey == lowerBound and not pastItemCursor) {};
 
-                // label the inner loop over all item-IDs in this set
                 label id_loop for (itemId in Set.keys(idSet)) {
                     if (not pastItemCursor) {
-                        // only start collecting once we’ve moved past the cursorItemId
                         switch (cursorItemId) {
                             case (?cId) if (itemId == cId) {
                                 pastItemCursor := true;
@@ -201,15 +254,23 @@ module {
                         };
                     };
 
-                    // fetch the real item and apply the remainingFilter
                     switch (BTree.get(table.items, Text.compare, itemId)) {
                         case (?item) {
                             if (evaluateFilter(item, remainingFilter)) {
                                 resultsBuffer.add({
                                     id = item.id;
-                                    item = Map.toArray(item.attributeDataValueMap);
+                                    item = Map.toArray(
+                                        Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                                            Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
+                                                Map.entries(item.attributeDataValueMap),
+                                                func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
+                                                    (entry.0, entry.1.value);
+                                                },
+                                            ),
+                                            thash,
+                                        )
+                                    );
                                 });
-                                // once we have limit+1, we can stop immediately
                                 if (resultsBuffer.size() > limit) {
                                     break scan_loop;
                                 };
@@ -220,16 +281,13 @@ module {
                 }; // end id_loop
             }; // end key_loop
 
-            // advance the index cursor for the next batch
             indexCursor := ?(lastProcessedKeyInBatch # "\u{0}");
 
-            // if we scanned fewer than the batch size, we’re at the end
             if (scanResult.results.size() < INDEX_SCAN_INTERNAL_BATCH_SIZE) {
                 continueScanningIndex := false;
             };
         }; // end scan_loop
 
-        // build the true “hasMore?” logic
         let hasMore = resultsBuffer.size() > limit;
         var itemsToReturn = Buffer.toArray(resultsBuffer);
         var nextCursor : ?SearchTypes.PaginatedScanCursor = null;
@@ -262,7 +320,6 @@ module {
         };
 
         var continueScanning = true;
-        // The cursor now tracks the last processed compound key and item ID.
         var cursor : ?(Text, Text) = null;
 
         label scan_loop while (continueScanning) {
@@ -307,7 +364,17 @@ module {
                                 if (evaluateFilter(item, remainingFilter)) {
                                     resultsBuffer.add({
                                         id = item.id;
-                                        item = Map.toArray(item.attributeDataValueMap);
+                                        item = Map.toArray(
+                                            Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                                                Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
+                                                    Map.entries(item.attributeDataValueMap),
+                                                    func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
+                                                        (entry.0, entry.1.value);
+                                                    },
+                                                ),
+                                                thash,
+                                            )
+                                        );
                                     });
                                 };
                             };
@@ -419,10 +486,10 @@ module {
 
                 var currentFilterExpressionResult = false;
                 switch (Map.get(attributeDataValueMap, thash, attributeNames)) {
-                    case (?attributeDataValue) {
+                    case (?storedAttribute) {
                         currentFilterExpressionResult := applyFilterExpressionCondition({
                             filterExpressionCondition;
-                            attributeDataValue;
+                            attributeDataValue = storedAttribute.value;
                         });
                     };
                     case (null) {

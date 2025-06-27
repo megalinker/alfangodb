@@ -1,132 +1,201 @@
-# AlfangoDB
+# AlfangoDB 📦
 
-AlfangoDB is a lightweight, modular database library implemented in Motoko, specifically designed for use on the Internet Computer (ICP). It supports comprehensive database operations including CRUD (Create, Read, Update, Delete), indexing, validation, and advanced filtering mechanisms.
+**AlfangoDB** is a pure‑Motoko, *stable‑memory‑friendly* document store with secondary indexes, batched background jobs and Dynamo‑style query operators.  It is designed to be embedded as a **library** inside your existing Internet Computer canisters or as a standalone actor (pre‑built class included).
 
-## Features
+---
 
-* **Fully Typed**: Provides rigorous data typing ensuring data integrity.
-* **CRUD Operations**: Comprehensive create, read, update, and delete functionalities.
-* **Indexing and Uniqueness**: Supports attribute indexing and uniqueness constraints.
-* **Advanced Filtering**: Offers a rich set of filtering expressions for querying.
-* **Stable Serialization**: Ensures data consistency and efficient serialization/deserialization.
-* **Modular Architecture**: Organized into clearly defined modules, enhancing maintainability.
+## ✨ Key features
 
-## Structure
+| Feature                                                                                            | What it means                                   | IC‑specific benefit                       |
+| -------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ----------------------------------------- |
+| **Fully stable** data‑structures (`BTree`, `Map`, `Set`, `Vector`)                                 | Survives canister upgrades without copy‑out     | Zero downtimes for schema updates         |
+| **Secondary indexes** (unique/non‑unique)                                                          | Query by arbitrary attribute prefixes or ranges | Sub‑millisecond indexed look‑ups          |
+| **Declarative filters** (`=`, `≠`, `<`, `≤`, `between`, `begins_with`, `contains`, `in`, `exists`) | Expressive queries without hand‑coding scans    | Syntax parallels DynamoDB / MongoDB       |
+| **Background jobs** (`BuildIndex`, `DropAttribute`)                                                | Heavy tasks run incrementally every 5 min       | No blocking of user writes                |
+| **Strict memory accounting**                                                                       | Per‑item byte estimate + global limit           | Prevents trap on `stableMemory.grow`      |
+| **Single‑lock serialisation**                                                                      | One global lock + timer                         | Simplicity & safety on a replicated state |
 
-* `modules`: Core operational logic, such as create, read, update, delete, and search.
-* `types`: Defines custom data types and interfaces.
-* `utils`: Helper functions for serialization, hashing, and ID generation.
-* `service`: Facade providing easy-to-use public interfaces for database operations.
+---
 
-## Getting Started
-
-### Installation
-
-Clone the repository and set up your environment:
+## 📦 Installation
 
 ```bash
-git clone https://github.com/yourrepo/AlfangoDB.git
-cd AlfangoDB
-dfx start --background
+mops install alfangodb   # Motoko Package Manager
 ```
 
-### Usage
+or add to your `dfx.json`:
 
-Instantiate your database:
-
-```motoko
-import AlfangoDB "./AlfangoDB/lib";
-
-actor {
-    stable let db = AlfangoDB.AlfangoDB();
+```json
+"canisters": {
+  "my_db": {
+    "type": "motoko",
+    "package": "alfangodb",
+    "main": "index.mo"
+  }
 }
 ```
 
-### Creating a Database
+> 🛈 **ICRC‑7** compliance: AlfangoDB keeps all data inside a single canister.  If you expect >4 GiB you must shard manually or use multiple actors.
+
+---
+
+## 🚀 Quick start
 
 ```motoko
-let result = AlfangoDB.createDatabase({
-    createDatabaseInput = { name = "MyDatabase" };
-    alfangoDB = db;
-});
+import AlfangoDB "mo:alfangodb";
+
+// ➊ Spin up the actor (or embed the struct inside your own).
+actor db : AlfangoDB.AlfangoDBActor {};
+
+// ➋ Create a database
+let _ = await db.updateOperation(#CreateDatabaseInput({ name = "demo" }));
+
+// ➌ Create a table with two attributes and one unique composite index
+let tblInput : InputTypes.CreateTableInputType = {
+  databaseName = "demo";
+  name = "users";
+  attributes = [
+    { name = "email";  dataType = #text;  unique = true;  required = true;  defaultValue = #default },
+    { name = "age";    dataType = #nat8;  unique = false; required = false; defaultValue = #default },
+  ];
+  indexes = [
+    { name = "by_email"; attributeNames = ["email"]; unique = true },
+  ];
+};
+let _ = await db.updateOperation(#CreateTableInput(tblInput));
+
+// ➍ Insert an item
+let itemRes = await db.updateOperation(#CreateItemInput({
+  databaseName = "demo";
+  tableName    = "users";
+  attributeDataValues = [ ("email", #text "alice@example.com"), ("age", #nat8 30) ];
+}));
 ```
 
-### Creating a Table
+---
+
+## 🛠 API guide
+
+For **every** operation below you may either:
+
+1. Call the low‑level helper (e.g. `Create.createItem({ …; alfangoDB })`) **inside** your own actor if you manage `AlfangoDB` storage yourself; **or**
+2. Use the high‑level multiplexed endpoint of `AlfangoDBActor` (`updateOperation` / `queryOperation`).
+
+### 1 · Schema operations
+
+| Operation               | Input variant          | Example                                                                                      |
+| ----------------------- | ---------------------- | -------------------------------------------------------------------------------------------- |
+| Create DB               | `#CreateDatabaseInput` | `#CreateDatabaseInput({ name = "blog" })`                                                    |
+| Create table            | `#CreateTableInput`    | See *Quick start* above                                                                      |
+| Add attribute           | `#AddAttributeInput`   | `{ attribute = { name="title"; dataType=#text; … } }`                                        |
+| Drop attribute (*lazy*) | `#DropAttributeInput`  | Attribute disappears instantly; heavy data cleanup runs in background                        |
+| Create index            | `#CreateIndexInput`    | `{ index = { name="by_status_date"; attributeNames=["status","createdAt"]; unique=false } }` |
+
+### 2 · CRUD
 
 ```motoko
-let result = AlfangoDB.createTable({
-    createTableInput = {
-        databaseName = "MyDatabase";
-        name = "Users";
-        attributes = [
-            { name = "username"; dataType = #text; unique = true; required = true; defaultValue = #default },
-            { name = "age"; dataType = #int; unique = false; required = false; defaultValue = #default },
-        ];
-        indexes = [];
-    };
-    alfangoDB = db;
+// Create (returns ulid id)
+let createOut = await db.updateOperation(#CreateItemInput({ … }));
+
+// Read by id
+let readOut = await db.queryOperation(#GetItemByIdInput({ … }));
+
+// Update (partial patch)
+let upd = #UpdateItemInput({
+  databaseName = "demo";
+  tableName    = "users";
+  id           = "01HF…";
+  attributeDataValues = [ ("age", #nat8 31) ];
 });
+let _ = await db.updateOperation(upd);
+
+// Delete
+let _ = await db.updateOperation(#DeleteItemInput({ … }));
 ```
 
-### Creating an Item
+### 3 · Query / Scan
 
 ```motoko
-let itemResult = await AlfangoDB.createItem({
-    createItemInput = {
-        databaseName = "MyDatabase";
-        tableName = "Users";
-        attributeDataValues = [
-            ("username", #text("alice")),
-            ("age", #int(30)),
-        ];
-    };
-    alfangoDB = db;
-});
+// Full predicate – uses best index automatically
+let filter : QueryFilter = #AND([
+  #expression({ attributeNames="status"; filterExpressionCondition=#EQ(#text "active") }),
+  #expression({ attributeNames="age";    filterExpressionCondition=#BETWEEN(#nat8 18, #nat8 35) })
+]);
+
+let out = await db.queryOperation(#ScanInput({
+  databaseName = "demo";
+  tableName    = "users";
+  filter       = filter;
+}));
 ```
 
-## Examples
-
-**Retrieve an item by ID:**
+### 4 · Paginated scan
 
 ```motoko
-let getResult = AlfangoDB.getItemById({
-    getItemByIdInput = {
-        databaseName = "MyDatabase";
-        tableName = "Users";
-        id = "some-item-id";
-    };
-    alfangoDB = db;
-});
+var cursor : ?SearchTypes.PaginatedScanCursor = null;
+label paged loop {
+  let page = await db.queryOperation(#PaginatedScanInput({
+    databaseName = "demo";
+    tableName    = "users";
+    filter       = filter;
+    limit        = 50;
+    cursor       = cursor;
+  }));
+  switch(page) { case (#ok({ items; nextCursor; hasMore; … })) {
+    // … process items …
+    if (hasMore) { cursor := nextCursor; continue paged } else { break paged };
+  } case (#err(e)) Debug.trap(debug_show e) };
+};
 ```
 
-**Scanning with filters:**
+---
 
-```motoko
-let scanResult = AlfangoDB.scan({
-    scanInput = {
-        databaseName = "MyDatabase";
-        tableName = "Users";
-        filterExpressions = [
-            { attributeName = "age"; filterExpressionCondition = #GT(#int(25)) },
-        ];
-    };
-    alfangoDB = db;
-});
-```
+## 🏎️ Runtime complexity cheatsheet
 
-## Development and Testing
+| Path                          | Typical case         | Notes                                               |
+| ----------------------------- | -------------------- | --------------------------------------------------- |
+| **createItem**                | `O(a + i·log n)`     | `a`=attribute count, `i`=indexes touched, `n`=items |
+| **getItemById**               | `O(log n)`           | B‑tree lookup                                       |
+| **updateItem**                | `O(k + i·log n)`     | `k`=attributes patched                              |
+| **scan (index)**              | `O(log n + r)`       | `r`=results returned                                |
+| **paginatedScan (full)**      | `O(log n + k·batch)` | Batched 100 rows at a time                          |
+| **createIndex (empty table)** | `O(1)`               | Immediate                                           |
+| **createIndex (populated)**   | `O(n)` *background*  | Done in 100‑row batches                             |
+| **dropAttribute**             | `O(n)` *background*  | Also batched                                        |
 
-Run tests using:
+> All collection operations rely on the complexity guarantees of Motoko’s `StableBTree`, `Map`, `Vector`, `Set`, and `Buffer`.  See */docs/complexity\_reference.md* for the full table reproduced from the Motoko base‑library docs.
+
+---
+
+## 🔧 Internal architecture (skip if you only need the API)
+
+* **Item storage** – stable `BTree<Id, Item>`; each `Item` holds a stable `Map` of `StoredAttribute`s (value + cached byte‑size).
+* **Index** – per‑table mutable `Map<IndexName, IndexTable>`; each `IndexTable` is a stable `BTree<CompoundKey, Set<Id>>`.
+* **Compound keys** – deterministic `serializeValue()` + `"||"` separator ⇒ lexical order == semantic order for primitive types.
+* **Memory budgeting** – running counter `totalStableBytes`; every create/update/delete adjusts it; checked against `STABLE_MEMORY_LIMIT` (default ≈ 3 GiB).
+* **Jobs** – `Vector<PendingJob>` per table. Timer fires every 300 s, processes at most 100 items per job, then reschedules.
+
+---
+
+## 🧪 Testing
 
 ```bash
-dfx deploy
-dfx canister call <your_canister> updateOperation '(your_input_here)'
+dfx start --background
+moc -r src/tests/test.mo
 ```
 
-## Contributions
+Unit tests cover uniqueness, pagination edges, schema drift and memory overflow traps.
 
-Contributions are welcome! Please open an issue or submit a pull request.
+---
 
-## License
+## 🤝 Contributing
 
-AlfangoDB is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+1. Fork ➜ feature branch ➜ PR.
+2. Ensure `mops test` & `ic-cdk-verify` pass.
+3. Document public functions and add complexity notes.
+
+---
+
+## 🪪 License
+
+MIT © 2025 Ztudio.  See `LICENSE` file for details.

@@ -4,6 +4,7 @@ import Utils "../utils";
 import Text "mo:base/Text";
 import Debug "mo:base/Debug";
 import HashMap "mo:base/HashMap";
+import Iter "mo:base/Iter";
 import Map "mo:map/Map";
 import Set "mo:map/Set";
 import { thash } "mo:map/Map";
@@ -117,20 +118,49 @@ module {
         violatedAttributes : ?[AttributeName];
         areConstraintsMet : Bool;
     } {
+
         for (indexMetadata in Vector.vals(table.metadata.indexes)) {
             if (indexMetadata.unique) {
                 switch (Map.get(table.indexes, thash, indexMetadata.name)) {
                     case (null) {
-                        Debug.print("CRITICAL: Inconsistency found. Metadata for index '" # indexMetadata.name # "' exists, but the index table does not.");
-                        return {
-                            violatedAttributes = ?indexMetadata.attributeNames;
-                            areConstraintsMet = false;
-                        };
+                        // The database state is inconsistent. This is a critical, unrecoverable error.
+                        Debug.trap("CRITICAL: Inconsistency found. Metadata for index '" # indexMetadata.name # "' exists, but the index table does not.");
                     };
                     case (?indexTable) {
-                        switch (Utils.generateCompoundKey(originalItemData, patchData, indexTable.attributeNames)) {
-                            case (null) {};
+                        // 1. Construct the "after" state of the item's values for key generation.
+                        var valuesMap = Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                            Iter.map<(Text, Datatypes.AttributeDataValue), (Text, Datatypes.AttributeDataValue)>(
+                                Map.entries(originalItemData),
+                                func(entry : (Text, Datatypes.AttributeDataValue)) : (Text, Datatypes.AttributeDataValue) {
+                                    let (attrName, originalValue) = entry;
+                                    // If the patch contains this attribute, use the new value, otherwise use the original.
+                                    switch (patchData.get(attrName)) {
+                                        case (?patchedValue) {
+                                            (attrName, patchedValue);
+                                        };
+                                        case (null) {
+                                            (attrName, originalValue);
+                                        };
+                                    };
+                                },
+                            ),
+                            thash,
+                        );
+
+                        // Also, add any brand new attributes from the patch that weren't in the original item.
+                        for ((attrName, patchedValue) in patchData.entries()) {
+                            if (not Map.has(valuesMap, thash, attrName)) {
+                                ignore Map.put(valuesMap, thash, attrName, patchedValue);
+                            };
+                        };
+
+                        // 2. Generate the compound key from the merged "after" state.
+                        switch (Utils.generateCompoundKey(valuesMap, indexTable.attributeNames)) {
+                            case (null) {
+                                // The item doesn't have all attributes for this unique index, so no violation is possible.
+                            };
                             case (?compoundKey) {
+                                // 3. Check for violations using the generated key.
                                 let isIndexValid = checkUniqueIndexViolation(
                                     indexTable,
                                     compoundKey,

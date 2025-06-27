@@ -70,7 +70,7 @@ module {
                 for (indexMetadata in createTableInput.indexes.vals()) {
                     let indexTable : Database.IndexTable = {
                         attributeNames = indexMetadata.attributeNames;
-                        items = BTree.init<Text, Set.Set<Text>>(null);
+                        var items = BTree.init<Text, Set.Set<Text>>(null);
                     };
                     Map.set(indexes, thash, indexMetadata.name, indexTable);
                 };
@@ -86,6 +86,7 @@ module {
                             thash,
                         );
                         var indexes = Vector.fromArray(createTableInput.indexes);
+                        var schemaVersion = 0;
                     };
                     items = BTree.init<Text, Database.Item>(null);
                     indexes = indexes;
@@ -127,6 +128,7 @@ module {
                 // --- VALIDATION PHASE ---
                 let errorBuffer = Buffer.Buffer<Text>(0);
 
+                // Use a HashMap for efficient validation lookups.
                 let itemDataHashMap = HashMap.fromIter<Text, Datatypes.AttributeDataValue>(
                     createItemInput.attributeDataValues.vals(),
                     createItemInput.attributeDataValues.size(),
@@ -134,11 +136,10 @@ module {
                     Text.hash,
                 );
 
-                // 1. Validate data types and check for unwanted attributes in one pass.
+                // 1. Validate data types and check for unwanted attributes.
                 for ((attrName, attrValue) in itemDataHashMap.entries()) {
                     switch (Map.get(table.metadata.attributesMap, thash, attrName)) {
                         case (?attrMetadata) {
-                            // Attribute exists, validate its type.
                             let {
                                 isValidAttributeDataType;
                                 actualAttributeDataType;
@@ -152,7 +153,6 @@ module {
                             };
                         };
                         case (null) {
-                            // Attribute is not defined in the table schema.
                             errorBuffer.add("Attribute '" # attrName # "' does not exist in table '" # table.name # "'.");
                         };
                     };
@@ -167,14 +167,15 @@ module {
                     };
                 };
 
-                // If any preliminary validation failed, stop here before expensive checks.
+                // If any preliminary validation failed, stop here.
                 if (errorBuffer.size() > 0) {
                     let errs = Buffer.toArray(errorBuffer);
                     Debug.print("error(s) creating item: " # debug_show (errs));
                     return #err(errs);
                 };
 
-                // 3. Validate unique constraints. For a new item, the "original" map is empty
+                // 3. Validate unique constraints.
+                // For a new item, the "original" map is empty. The patch data is the new item data.
                 let { areConstraintsMet; violatedAttributes } = Commons.validateUniqueConstraints({
                     originalItemData = Map.new<Text, Datatypes.AttributeDataValue>();
                     patchData = itemDataHashMap;
@@ -194,7 +195,7 @@ module {
                     };
                 };
 
-                // Final check on the error buffer after all validations.
+                // Final check on the error buffer.
                 if (errorBuffer.size() > 0) {
                     let errs = Buffer.toArray(errorBuffer);
                     Debug.print("error(s) creating item: " # debug_show (errs));
@@ -204,10 +205,23 @@ module {
                 // --- COMMIT PHASE ---
                 // All validations passed. Now create stable structures and commit.
 
-                let itemDataMap = Map.fromIter<Text, Datatypes.AttributeDataValue>(itemDataHashMap.entries(), thash);
+                // 1. Create the map of StoredAttribute records, calculating size for each.
+                let itemStoredAttrMap = Map.new<Text, Database.StoredAttribute>();
+                for ((attrName, attrValue) in itemDataHashMap.entries()) {
+                    Map.set(
+                        itemStoredAttrMap,
+                        thash,
+                        attrName,
+                        {
+                            value = attrValue;
+                            // Calculate and cache the size ONCE at creation time.
+                            sizeInBytes = Utils.calculateAttributeDataValueSize(attrValue);
+                        },
+                    );
+                };
 
-                // Enforce global memory budget
-                let newItemSize = Utils.calculateItemSize(itemDataMap);
+                // 2. Enforce global memory budget using the new calculateItemSize.
+                let newItemSize = Utils.calculateItemSize(itemStoredAttrMap);
                 if (alfangoDB.totalStableBytes + newItemSize > alfangoDB.STABLE_MEMORY_LIMIT) {
                     let remark : Text = "Stable memory limit reached. Cannot create new item.";
                     Debug.print(remark);
@@ -215,19 +229,23 @@ module {
                 };
                 alfangoDB.totalStableBytes += newItemSize;
 
-                // Generate ID and update indexes
+                // 3. Generate ID and update indexes.
                 let newItemId = await Utils.generateULIDAsync();
+
+                // Create a simple map of raw values just for key generation.
+                let valuesMap = Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                    Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
+                        Map.entries(itemStoredAttrMap),
+                        func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
+                            let (attrName, storedAttr) = entry;
+                            return (attrName, storedAttr.value);
+                        },
+                    ),
+                    thash,
+                );
+
                 for ((indexName, indexTable) in Map.entries(table.indexes)) {
-                    // For a new item, there is no patch; all data is original.
-                    switch (Utils.generateCompoundKey(
-                        itemDataMap,
-                        HashMap.HashMap<Text, Datatypes.AttributeDataValue>(
-                            0,
-                            Text.equal,
-                            Text.hash
-                        ),
-                        indexTable.attributeNames
-                    )) {
+                    switch (Utils.generateCompoundKey(valuesMap, indexTable.attributeNames)) {
                         case null {
                             /* missing attributes for this index, skip */
                         };
@@ -242,10 +260,10 @@ module {
                     };
                 };
 
-                // Create the item and update count
+                // 4. Create the final item and update table count.
                 let item : Database.Item = {
                     id = newItemId;
-                    var attributeDataValueMap = itemDataMap;
+                    var attributeDataValueMap = itemStoredAttrMap;
                     createdAt = Time.now();
                     var updatedAt = Time.now();
                     var sizeInBytes = newItemSize;
@@ -254,10 +272,10 @@ module {
                 table.itemCount += 1;
                 Debug.print("item created with id: " # debug_show (item.id));
 
-                // Return success
+                // 5. Return success, converting the stored map to the public output format.
                 return #ok({
                     id = item.id;
-                    item = Map.toArray(item.attributeDataValueMap);
+                    item = Map.toArray(valuesMap); // Return the simple map of values
                 });
             };
         };

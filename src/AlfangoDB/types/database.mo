@@ -35,13 +35,19 @@ module {
     public type TableMetadata = {
         attributesMap : Map.Map<AttributeName, AttributeMetadata>;
         var indexes : Vector.Vector<TableIndexMetadata>;
+        var schemaVersion : Nat;
     };
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    public type StoredAttribute = {
+        value : AttributeDataValue;
+        sizeInBytes : Nat64;
+    };
+
     public type Item = {
         id : Id;
-        var attributeDataValueMap : Map.Map<AttributeName, AttributeDataValue>;
+        var attributeDataValueMap : Map.Map<AttributeName, StoredAttribute>;
         createdAt : Time.Time;
         var updatedAt : Time.Time;
         var sizeInBytes : Nat64;
@@ -49,7 +55,7 @@ module {
 
     public type IndexTable = {
         attributeNames : [AttributeName];
-        items : BTree.BTree<Text, Set.Set<Id>>;
+        var items : BTree.BTree<Text, Set.Set<Id>>;
     };
 
     public type Table = {
@@ -80,12 +86,14 @@ module {
         attributeNames : AttributeName;
         var lastProcessedId : ?Id;
         var isComplete : Bool;
+        var schemaVersionAtCreation : Nat;
     };
 
     public type BuildIndexJob = {
         indexName : IndexName;
         var lastProcessedId : ?Id;
         var isComplete : Bool;
+        var schemaVersionAtCreation : Nat;
     };
 
     public type IndexOp = {

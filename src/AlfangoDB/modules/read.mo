@@ -1,4 +1,5 @@
 import Database "../types/database";
+import Datatypes "../types/datatype";
 import InputTypes "../types/input";
 import OutputTypes "../types/output";
 import Map "mo:map/Map";
@@ -52,9 +53,20 @@ module {
                     case (?table) {
                         switch (BTree.get(table.items, Text.compare, getItemByIdInput.id)) {
                             case (?item) {
+                                // THE FIX: Convert the map of StoredAttributes to a map of raw values for output.
                                 return #ok({
                                     id = getItemByIdInput.id;
-                                    item = Map.toArray(item.attributeDataValueMap);
+                                    item = Map.toArray(
+                                        Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                                            Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
+                                                Map.entries(item.attributeDataValueMap),
+                                                func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
+                                                    (entry.0, entry.1.value);
+                                                },
+                                            ),
+                                            thash,
+                                        )
+                                    );
                                 });
                             };
                             case (null) {
@@ -98,7 +110,17 @@ module {
                                 case (?item) {
                                     itemsBuffer.add({
                                         id = id;
-                                        item = Map.toArray(item.attributeDataValueMap);
+                                        item = Map.toArray(
+                                            Map.fromIter<Text, Datatypes.AttributeDataValue>(
+                                                Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
+                                                    Map.entries(item.attributeDataValueMap),
+                                                    func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
+                                                        (entry.0, entry.1.value);
+                                                    },
+                                                ),
+                                                thash,
+                                            )
+                                        );
                                     });
                                 };
                             };
