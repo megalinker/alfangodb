@@ -142,7 +142,7 @@ actor TestMain {
         };
 
         // Get Table Metadata
-        let meta_res = await AlfangoDB.queryOperation({
+        let meta_res = AlfangoDB.queryOperation({
             queryOpsInput = #GetTableMetadataInput({
                 databaseName = dbName;
                 tableName = tableName;
@@ -305,7 +305,7 @@ actor TestMain {
         });
 
         // Simple Scan with index
-        let scan_res = await AlfangoDB.scan({
+        let scan_res = AlfangoDB.scan({
             scanInput = {
                 databaseName = dbName;
                 tableName = tableName;
@@ -410,7 +410,7 @@ actor TestMain {
         };
 
         // 5. Scan for items with the OLD status ("open"). It should find 0.
-        let scan_old_res = await AlfangoDB.scan({
+        let scan_old_res = AlfangoDB.scan({
             scanInput = {
                 databaseName = dbName;
                 tableName = tableName;
@@ -429,7 +429,7 @@ actor TestMain {
         };
 
         // 6. Scan for items with the NEW status ("closed"). It should find 1.
-        let scan_new_res = await AlfangoDB.scan({
+        let scan_new_res = AlfangoDB.scan({
             scanInput = {
                 databaseName = dbName;
                 tableName = tableName;
@@ -518,7 +518,7 @@ actor TestMain {
         };
 
         // 3. Verify the index was actually removed from the table's metadata.
-        let meta_res = await AlfangoDB.queryOperation({
+        let meta_res = AlfangoDB.queryOperation({
             queryOpsInput = #GetTableMetadataInput({
                 databaseName = dbName;
                 tableName = tableName;
@@ -976,7 +976,7 @@ actor TestMain {
 
         // 3. Verification: Scan for both the old and new index values.
         // There should be 0 items with the old status.
-        let scan_old_res = await AlfangoDB.scan({
+        let scan_old_res = AlfangoDB.scan({
             scanInput = {
                 databaseName = dbName;
                 tableName = tableName;
@@ -997,7 +997,7 @@ actor TestMain {
         };
 
         // There should be 'itemCount' items with the new status.
-        let scan_new_res = await AlfangoDB.scan({
+        let scan_new_res = AlfangoDB.scan({
             scanInput = {
                 databaseName = dbName;
                 tableName = tableName;
@@ -1242,7 +1242,7 @@ actor TestMain {
             page += 1;
             Debug.print(" -> Fetching page " # Nat.toText(page) # "...");
 
-            let scan_res = await AlfangoDB.paginatedScan({
+            let scan_res = AlfangoDB.paginatedScan({
                 paginatedScanInput = {
                     databaseName = dbName;
                     tableName = tableName;

@@ -151,7 +151,7 @@ module {
                                 Iter.map<(Text, Database.StoredAttribute), (Text, Datatypes.AttributeDataValue)>(
                                     Map.entries(item.attributeDataValueMap),
                                     func(entry : (Text, Database.StoredAttribute)) : (Text, Datatypes.AttributeDataValue) {
-                                        (entry.0, entry.1.value)
+                                        (entry.0, entry.1.value);
                                     },
                                 ),
                                 thash,
@@ -702,7 +702,7 @@ module {
     public func scan({
         scanInput : InputTypes.ScanInputType;
         alfangoDB : Database.AlfangoDB;
-    }) : async OutputTypes.ScanOutputType {
+    }) : OutputTypes.ScanOutputType {
 
         let databases = alfangoDB.databases;
         let { databaseName; tableName; filter } = scanInput;
@@ -746,7 +746,7 @@ module {
     public func scanAndGetIds({
         scanAndGetIdsInput : InputTypes.ScanAndGetIdsInputType;
         alfangoDB : Database.AlfangoDB;
-    }) : async OutputTypes.ScanAndGetIdsOutputType {
+    }) : OutputTypes.ScanAndGetIdsOutputType {
 
         let databases = alfangoDB.databases;
         let { databaseName; tableName; filter } = scanAndGetIdsInput;
@@ -790,7 +790,7 @@ module {
     public func paginatedScan({
         paginatedScanInput : InputTypes.PaginatedScanInputType;
         alfangoDB : Database.AlfangoDB;
-    }) : async OutputTypes.PaginatedScanOutputType {
+    }) : OutputTypes.PaginatedScanOutputType {
 
         let { databaseName; tableName; filter; limit; cursor } = paginatedScanInput;
 

@@ -162,8 +162,8 @@ actor class AlfangoDBActor() {
     * Public endpoint for all data query operations (read, scan, etc.).
     * It delegates the call to the central service dispatcher.
     */
-    public shared func queryOperation(queryOpsInput : InputTypes.QueryOpsInputType) : async OutputTypes.QueryOpsOutputType {
-        return await Service.queryOperation({
+    public shared query func queryOperation(queryOpsInput : InputTypes.QueryOpsInputType) : async OutputTypes.QueryOpsOutputType {
+        return Service.queryOperation({
             queryOpsInput;
             alfangoDB = db_instance;
         });
